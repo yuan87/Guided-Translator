@@ -4,10 +4,15 @@ import { FileUp, File, Check, AlertCircle, Loader2 } from 'lucide-react';
 import type { DocumentStructure } from '../types';
 import { extractStructuredContent } from '../services/documentParser';
 
+interface ApiKeyConfig {
+    key: string;
+    isPaid: boolean;
+}
+
 interface DocumentUploadProps {
     onDocumentLoaded: (doc: DocumentStructure) => void;
     currentDocument: DocumentStructure | null;
-    apiKeys?: string[];
+    apiKeys?: string[] | ApiKeyConfig[];
 }
 
 export default function DocumentUpload({ onDocumentLoaded, currentDocument, apiKeys }: DocumentUploadProps) {
@@ -15,6 +20,7 @@ export default function DocumentUpload({ onDocumentLoaded, currentDocument, apiK
     const [isProcessing, setIsProcessing] = useState(false);
     const [progress, setProgress] = useState({ current: 0, total: 0 });
     const [error, setError] = useState<string | null>(null);
+    const [useMinerU, setUseMinerU] = useState(true); // MinerU enabled by default
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const handleDragOver = (e: React.DragEvent) => {
@@ -59,9 +65,16 @@ export default function DocumentUpload({ onDocumentLoaded, currentDocument, apiK
         setProgress({ current: 0, total: 0 });
 
         try {
-            const doc = await extractStructuredContent(file, apiKeys, (current, total) => {
+            // Normalize apiKeys to string[] (extract just the key property if ApiKeyConfig[])
+            const keyStrings = apiKeys && apiKeys.length > 0
+                ? (typeof apiKeys[0] === 'string'
+                    ? apiKeys as string[]
+                    : (apiKeys as ApiKeyConfig[]).map(k => k.key))
+                : undefined;
+
+            const doc = await extractStructuredContent(file, keyStrings, (current, total) => {
                 setProgress({ current, total });
-            });
+            }, useMinerU);
 
             if (doc.language !== 'en') {
                 setError(`Warning: Document appears to be in ${doc.language === 'zh' ? 'Chinese' : 'an unknown language'}. Please upload an English document.`);
@@ -140,6 +153,20 @@ export default function DocumentUpload({ onDocumentLoaded, currentDocument, apiK
                         </button>
                     </p>
                     <p className="text-sm text-gray-500">Maximum file size: 50MB</p>
+
+                    {/* MinerU Toggle */}
+                    <label className="mt-4 flex items-center gap-2 cursor-pointer bg-gray-50 px-4 py-2 rounded-lg border border-gray-200 hover:bg-gray-100 transition-colors">
+                        <input
+                            type="checkbox"
+                            checked={useMinerU}
+                            onChange={(e) => setUseMinerU(e.target.checked)}
+                            className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                        />
+                        <span className="text-sm text-gray-700">
+                            Use MinerU <span className="text-gray-500">(Recommended for complex PDFs)</span>
+                        </span>
+                    </label>
+
                     <input
                         ref={fileInputRef}
                         type="file"

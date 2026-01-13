@@ -2,28 +2,59 @@
 // Handle all Gemini API interactions for translation
 
 import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
-import type { GlossaryEntry, TermMatch, TranslatedChunk, Chunk } from '../types';
+import type { GlossaryEntry, TermMatch, TranslatedChunk, Chunk, TokenUsage } from '../types';
 
 // Key Management
-let KEY_POOL: string[] = [import.meta.env.VITE_API_KEY || ''];
-let currentKeyIndex = 0;
-let genAI = new GoogleGenerativeAI(KEY_POOL[0]);
+interface ApiKeyConfig {
+    key: string;
+    isPaid: boolean;
+}
 
-export function setApiKeys(keys: string[]) {
+let KEY_POOL: ApiKeyConfig[] = [{ key: import.meta.env.VITE_API_KEY || '', isPaid: false }];
+let currentKeyIndex = 0;
+let genAI = new GoogleGenerativeAI(KEY_POOL[0].key);
+
+export function setApiKeys(keys: string[] | ApiKeyConfig[]) {
     if (keys.length > 0) {
-        KEY_POOL = keys;
+        // Support both string[] (legacy) and ApiKeyConfig[] (new)
+        if (typeof keys[0] === 'string') {
+            KEY_POOL = (keys as string[]).map(k => ({ key: k, isPaid: false }));
+        } else {
+            KEY_POOL = keys as ApiKeyConfig[];
+        }
         currentKeyIndex = 0;
-        genAI = new GoogleGenerativeAI(KEY_POOL[0]);
-        console.log(`Updated API Key Pool with ${keys.length} keys`);
+        genAI = new GoogleGenerativeAI(KEY_POOL[0].key);
+        const paidCount = KEY_POOL.filter(k => k.isPaid).length;
+        console.log(`Updated API Key Pool: ${KEY_POOL.length} keys (${paidCount} paid, ${KEY_POOL.length - paidCount} free)`);
     }
+}
+
+export function hasPaidKeys(): boolean {
+    return KEY_POOL.some(k => k.isPaid);
+}
+
+/**
+ * Switch to a paid key if available
+ * Returns true if successfully switched to a paid key
+ */
+export function skipToPaidKey(): boolean {
+    const paidKeyIndex = KEY_POOL.findIndex(k => k.isPaid);
+    if (paidKeyIndex !== -1 && paidKeyIndex !== currentKeyIndex) {
+        currentKeyIndex = paidKeyIndex;
+        genAI = new GoogleGenerativeAI(KEY_POOL[currentKeyIndex].key);
+        console.log(`Skipped to Paid API Key #${currentKeyIndex + 1}`);
+        return true;
+    }
+    return false;
 }
 
 function rotateKey(): boolean {
     if (KEY_POOL.length <= 1) return false;
 
     currentKeyIndex = (currentKeyIndex + 1) % KEY_POOL.length;
-    genAI = new GoogleGenerativeAI(KEY_POOL[currentKeyIndex]);
-    console.log(`Switched to API Key #${currentKeyIndex + 1} of ${KEY_POOL.length}`);
+    genAI = new GoogleGenerativeAI(KEY_POOL[currentKeyIndex].key);
+    const keyType = KEY_POOL[currentKeyIndex].isPaid ? 'Paid' : 'Free';
+    console.log(`Switched to API Key #${currentKeyIndex + 1} of ${KEY_POOL.length} (${keyType})`);
     return true;
 }
 
@@ -55,8 +86,7 @@ export async function translateChunk(
 
     // Retry logic for rate limits (429)
     let retries = 0;
-    const maxRetries = 5;
-    const baseDelay = 3000;
+    const maxRetries = 3; // Reduced retries since we now wait 60s
     let keysTried = 0;
 
     while (retries <= maxRetries) {
@@ -77,7 +107,16 @@ export async function translateChunk(
             });
 
             const result = await model.generateContent(prompt);
-            const translation = cleanResponse(result.response.text());
+            const response = result.response;
+            const translation = cleanResponse(response.text());
+
+            // Extract token usage
+            const usageMetadata = response.usageMetadata;
+            const tokenUsage: TokenUsage | undefined = usageMetadata ? {
+                inputTokens: usageMetadata.promptTokenCount,
+                outputTokens: usageMetadata.candidatesTokenCount,
+                totalTokens: usageMetadata.totalTokenCount
+            } : undefined;
 
             // Identify matched terms in the source text
             const matchedTerms = identifyTermsInText(chunk.text, glossary);
@@ -86,7 +125,8 @@ export async function translateChunk(
                 ...chunk,
                 translation,
                 matchedTerms,
-                newTerms: []
+                newTerms: [],
+                tokenUsage
             };
         } catch (error: any) {
             // Check for 429 or other transient errors
@@ -96,27 +136,35 @@ export async function translateChunk(
                     const rotated = rotateKey();
                     if (rotated) {
                         keysTried++;
+                        const keyType = KEY_POOL[currentKeyIndex].isPaid ? 'Paid' : 'Free';
                         if (onStatusUpdate) {
-                            onStatusUpdate(`Rate limit hit. Switching to Key #${currentKeyIndex + 1}...`);
+                            onStatusUpdate(`Rate limit hit. Switching to ${keyType} Key #${currentKeyIndex + 1}...`);
                         }
                         // Retry immediately with new key
                         continue;
                     }
                 }
 
-                // If no more keys to rotate or single key, use standard backoff
+                // All keys exhausted - wait 60 seconds for free tier reset
                 retries++;
-                const delay = baseDelay * retries;
 
                 if (retries > maxRetries) {
-                    throw new Error(`Failed to translate chunk ${chunk.id} after ${maxRetries} retries: ${error}`);
+                    throw new Error(`Rate limit exceeded. Please wait 1 minute and try again, or add a Paid API key for unlimited usage.`);
                 }
 
-                if (onStatusUpdate) {
-                    onStatusUpdate(`All keys rate limited. Pausing for ${delay / 1000}s...`);
+                const hasPaid = KEY_POOL.some(k => k.isPaid);
+                console.warn(`All ${KEY_POOL.length} keys rate limited for chunk ${chunk.id}. Waiting 60s...`);
+
+                // Countdown loop with live updates
+                for (let secondsLeft = 60; secondsLeft > 0; secondsLeft--) {
+                    if (onStatusUpdate) {
+                        const paidMsg = hasPaid
+                            ? `⏱️ Rate limit hit. Waiting ${secondsLeft}s... (Click "Use Paid API" to skip)`
+                            : `⏱️ Rate limit hit. Waiting ${secondsLeft}s... Add a Paid API key to skip wait.`;
+                        onStatusUpdate(paidMsg);
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 1000));
                 }
-                console.warn(`Rate limit hit for chunk ${chunk.id}. Retrying in ${delay}ms...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
 
                 keysTried = 0; // Reset
             } else {
@@ -151,15 +199,16 @@ TRANSLATION RULES:
 1. MANDATORY: Use the exact Chinese translations provided in the GLOSSARY for all matching English terms.
 2. FULL TRANSLATION: You MUST translate ALL text, including content within tables, lists, and charts. Do NOT leave any English text untranslated unless it is a proper noun.
 3. PROPER NOUNS: Preserve proper names (person names like "von Mises"), standard codes (e.g., "EN 13001"), and specific technical identifiers in their original English form.
-4. TABLES & LISTS: Translate the identifying labels (e.g., "Table 1", "Figure 2") and all cell content.
-5. PRESERVE STRUCTURE EXACTLY:
+4. CLAUSE NUMBERS: If the text starts with a clause number (e.g., "5.2.1", "A.1"), PRESERVE IT EXACTLY at the start of the translation. Do not translate or modify clause numbers.
+5. TABLES & LISTS: Translate the identifying labels (e.g., "Table 1", "Figure 2") and all cell content.
+6. PRESERVE STRUCTURE EXACTLY:
    - Maintain the EXACT NUMBER of newline characters (\\n) as in the source.
    - If there are 2 newlines between paragraphs, use exactly 2 in translation.
    - If there are 3+ newlines (section breaks), preserve the exact count.
    - Keep all headings, list formats, numbering, and special characters exactly.
    - Preserve INDENTATION level for lists (use same number of spaces).
-6. TONALITY: Use formal, objective, and precise technical language.
-7. NO COMMENTARY: Provide ONLY the translation. Do not include markdown code blocks (\`\`\`) or prefixes like "Translation:".
+7. TONALITY: Use formal, objective, and precise technical language.
+8. NO COMMENTARY: Provide ONLY the translation. Do not include markdown code blocks (\`\`\`) or prefixes like "Translation:".
 8. TABLE & FORM PRESERVATION:
    - CRITICAL: If source contains tabular data, key-value pairs (e.g., "Name: John"), or form fields:
      * PRESERVE the layout using Markdown table syntax: | Label | Value |
@@ -231,7 +280,8 @@ export async function translateChunks(
     chunks: Chunk[],
     glossary: GlossaryEntry[],
     onProgress?: (current: number, total: number) => void,
-    onStatusUpdate?: (status: string) => void
+    onStatusUpdate?: (status: string) => void,
+    onChunkComplete?: (chunk: TranslatedChunk) => void
 ): Promise<TranslatedChunk[]> {
     const translatedChunks: TranslatedChunk[] = [];
 
@@ -246,6 +296,10 @@ export async function translateChunks(
 
             if (onProgress) {
                 onProgress(i + 1, chunks.length);
+            }
+
+            if (onChunkComplete) {
+                onChunkComplete(translatedChunk);
             }
 
             // Rate limiting for free tier Gemini API

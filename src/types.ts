@@ -10,8 +10,11 @@ export interface TermIndex {
     [key: string]: GlossaryEntry;
 }
 
-
-
+export interface TokenUsage {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+}
 export interface Project {
     id: string; // UUID or generated ID
     standardTitle: string; // e.g., "EN 13001-3-1"
@@ -19,6 +22,7 @@ export interface Project {
     status: 'parsing' | 'translating' | 'editing' | 'completed';
     totalChunks: number;
     translatedChunks: number;
+    tokenUsage?: TokenUsage;
 }
 
 export interface ChunkData {
@@ -40,6 +44,7 @@ export interface Chunk {
     metadata?: {
         heading?: string;
         level?: number;
+        clauseNumber?: string; // e.g., "5.2.1", "A.1"
     };
 }
 
@@ -47,6 +52,7 @@ export interface TranslatedChunk extends Chunk {
     translation: string;
     matchedTerms: TermMatch[];
     newTerms: NewTerm[];
+    tokenUsage?: TokenUsage;
 }
 
 export interface TermMatch {

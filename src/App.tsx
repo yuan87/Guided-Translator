@@ -12,12 +12,13 @@ import SavedProjectsPanel from './components/SavedProjectsPanel'; // Import Save
 import ResumeModal from './components/ResumeModal';
 import { extractStandardTitle } from './services/documentParser';
 import { splitIntoChunks } from './services/chunkManager';
-import { translateChunks, calculateCoverage, setApiKeys } from './services/geminiService';
+import { translateChunks, calculateCoverage, setApiKeys, hasPaidKeys, skipToPaidKey } from './services/geminiService';
 import { analyzeEdit, extractTerminologyChanges, RefinementPattern } from './services/editAnalysisService';
 import { addUserPreference } from './services/userGlossaryService'; // Corrected imports
 import { storageService } from './services/storageService';
 import ApiKeyManager from './components/ApiKeyManager'; // Import Key Manager
-import type { GlossaryEntry, TranslatedChunk, TranslationProgress, AppStatus, Chunk, Project } from './types';
+import type { GlossaryEntry, TranslatedChunk, TranslationProgress, AppStatus, Chunk, Project, TokenUsage } from './types';
+import TokenStats from './components/TokenStats'; // Import TokenStats component
 import { Book, FileText, Settings, AlertTriangle } from 'lucide-react'; // Added AlertTriangle
 
 export default function App() {
@@ -37,6 +38,10 @@ export default function App() {
     const [warningMessage, setWarningMessage] = useState<string | null>(null);
     const [showProjectsPanel, setShowProjectsPanel] = useState(false); // Persistence Panel State
     const [loadedDocument, setLoadedDocument] = useState<import('./types').DocumentStructure | null>(null);
+    const [showUsePaidButton, setShowUsePaidButton] = useState(false); // Show "Use Paid API" button
+
+    // Token Usage Tracking
+    const [sessionTokenUsage, setSessionTokenUsage] = useState<TokenUsage>({ inputTokens: 0, outputTokens: 0, totalTokens: 0 });
 
     // Edit & Refine Mode State
     const [editMode, setEditMode] = useState(false);
@@ -48,7 +53,7 @@ export default function App() {
     } | null>(null);
 
     // Initialize Storage and API Keys
-    const [availableApiKeys, setAvailableApiKeys] = useState<string[]>([]);
+    const [availableApiKeys, setAvailableApiKeys] = useState<{ key: string, isPaid: boolean }[]>([]);
 
     useEffect(() => {
         storageService.init().catch(console.error);
@@ -59,8 +64,12 @@ export default function App() {
             try {
                 const parsedKeys = JSON.parse(storedKeys);
                 if (Array.isArray(parsedKeys) && parsedKeys.length > 0) {
-                    setApiKeys(parsedKeys);
-                    setAvailableApiKeys(parsedKeys);
+                    // Handle both legacy string[] and new ApiKeyConfig[]
+                    const normalizedKeys = typeof parsedKeys[0] === 'string'
+                        ? parsedKeys.map((k: string) => ({ key: k, isPaid: false }))
+                        : parsedKeys;
+                    setApiKeys(normalizedKeys);
+                    setAvailableApiKeys(normalizedKeys);
                 }
             } catch (e) {
                 console.error("Failed to parse stored API keys", e);
@@ -68,7 +77,7 @@ export default function App() {
         }
     }, []);
 
-    const handleApiKeysUpdated = (keys: string[]) => {
+    const handleApiKeysUpdated = (keys: { key: string, isPaid: boolean }[]) => {
         setApiKeys(keys);
         setAvailableApiKeys(keys);
         localStorage.setItem('gemini_api_keys', JSON.stringify(keys));
@@ -76,8 +85,11 @@ export default function App() {
 
     // Load Project Handler
     const loadProject = async (project: Project) => {
+        console.log('[DEBUG] loadProject called for:', project.standardTitle, 'status:', project.status);
         try {
             const storedChunks = await storageService.getProjectChunks(project.id);
+            console.log('[DEBUG] Retrieved', storedChunks.length, 'chunks from storage');
+
             const reconstructedTranslatedChunks: TranslatedChunk[] = storedChunks.map(c => ({
                 id: c.chunkId,
                 position: c.position,
@@ -90,18 +102,33 @@ export default function App() {
 
             setCurrentProject(project);
             setTranslatedChunks(reconstructedTranslatedChunks);
-            setChunks(reconstructedTranslatedChunks.map(c => ({ ...c, translation: undefined }))); // Reconstruct source chunks
+
+            // Reconstruct source chunks - ensure 'text' property is properly set
+            const sourceChunks = reconstructedTranslatedChunks.map(c => ({
+                id: c.id,
+                text: c.text,
+                position: c.position,
+                type: c.type,
+                metadata: c.metadata
+            }));
+            console.log('[DEBUG] Setting chunks:', sourceChunks.length)
+            setChunks(sourceChunks);
 
             // Restore state based on project status
             if (project.status === 'completed' || project.status === 'editing') {
+                console.log('[DEBUG] Project is completed/editing, setting status to complete');
                 setStatus('complete');
                 setProgress(prev => ({
                     ...prev,
                     glossaryCoverage: calculateCoverage(reconstructedTranslatedChunks, glossary)
                 }));
             } else if (project.status === 'translating') {
+                console.log('[DEBUG] Project is translating, setting status to idle for resume');
                 setStatus('idle'); // Allow resuming
-                // Progress is already partially set by setTranslatedChunks above
+            } else {
+                // For parsing or other incomplete states
+                console.log('[DEBUG] Project is in state:', project.status, '- setting status to idle');
+                setStatus('idle');
             }
         } catch (err) {
             console.error("Failed to load project", err);
@@ -148,21 +175,26 @@ export default function App() {
     };
 
     const handleDocumentLoaded = async (doc: import('./types').DocumentStructure) => {
+        console.log('[DEBUG] handleDocumentLoaded called', { pages: doc.pages, wordCount: doc.wordCount, textLength: doc.text.length });
         const text = doc.text;
         setLoadedDocument(doc); // <-- Track the loaded document for UI display
 
         const standardTitle = extractStandardTitle(text, "Document");
+        console.log('[DEBUG] Extracted standard title:', standardTitle);
 
         // Check for existing project
         const existingProject = await storageService.getProjectByTitle(standardTitle);
+        console.log('[DEBUG] Existing project check:', existingProject ? 'FOUND' : 'NOT FOUND');
 
         if (existingProject) {
+            console.log('[DEBUG] Showing resume modal for existing project');
             setResumableProject(existingProject);
             // Mock file object
             setPendingFile({ file: new File([text], "document.pdf"), text });
             setShowResumeModal(true);
         } else {
             // New Project
+            console.log('[DEBUG] Creating new project...');
             const project: Project = {
                 id: crypto.randomUUID(),
                 standardTitle,
@@ -173,9 +205,12 @@ export default function App() {
             };
             await storageService.saveProject(project);
             setCurrentProject(project);
+            console.log('[DEBUG] Project saved, now splitting into chunks...');
 
             const parsedChunks = splitIntoChunks(text);
+            console.log('[DEBUG] splitIntoChunks returned', parsedChunks.length, 'chunks');
             setChunks(parsedChunks);
+            console.log('[DEBUG] setChunks called, setting status to idle');
             setStatus('idle');
         }
     };
@@ -193,6 +228,10 @@ export default function App() {
         setCurrentProject(updatedProject);
 
         const startTime = Date.now();
+
+        // Reset session token usage if starting fresh, or keep if resuming in same session?
+        // Let's reset for "new run" feeling
+        setSessionTokenUsage({ inputTokens: 0, outputTokens: 0, totalTokens: 0 });
 
         // Determine start index based on existing translated chunks
         const startIndex = translatedChunks.length;
@@ -227,10 +266,39 @@ export default function App() {
             if (currentProject) {
                 await storageService.updateProjectProgress(currentProject.id, globalCurrent);
             }
-        }, (statusMsg: string) => { // Added callback for status updates
+        }, (statusMsg: string) => {
             setWarningMessage(statusMsg);
-            // Optional: Auto clear after some time, or let it persist until next update
-            // setTimeout(() => setWarningMessage(null), 5000); 
+            // Show "Use Paid API" button when countdown is active (indicated by ⏱️)
+            if (statusMsg.includes('⏱️') && hasPaidKeys()) {
+                setShowUsePaidButton(true);
+            } else {
+                setShowUsePaidButton(false);
+            }
+        }, async (chunkResult: TranslatedChunk) => {
+            // Token aggregation
+            if (chunkResult.tokenUsage) {
+                setSessionTokenUsage(prev => ({
+                    inputTokens: prev.inputTokens + (chunkResult.tokenUsage?.inputTokens || 0),
+                    outputTokens: prev.outputTokens + (chunkResult.tokenUsage?.outputTokens || 0),
+                    totalTokens: prev.totalTokens + (chunkResult.tokenUsage?.totalTokens || 0)
+                }));
+            }
+
+            // INCREMENTAL SAVE - Persist chunk immediately after translation
+            if (currentProject) {
+                const chunkData: import('./types').ChunkData = {
+                    projectId: currentProject.id,
+                    chunkId: chunkResult.id,
+                    position: chunkResult.position,
+                    originalText: chunkResult.text,
+                    originalType: chunkResult.type,
+                    initialTranslation: chunkResult.translation,
+                    currentTranslation: chunkResult.translation,
+                    matchedTerms: chunkResult.matchedTerms
+                };
+                await storageService.saveChunks([chunkData]);
+                console.log(`[DB] Saved chunk ${chunkResult.id} to IndexedDB`);
+            }
         });
 
         const finalResults = [...translatedChunks, ...newResults];
@@ -466,20 +534,45 @@ export default function App() {
 
                 {/* Warning Banner */}
                 {warningMessage && (
-                    <div className="bg-amber-100 border-l-4 border-amber-500 text-amber-700 p-4 rounded shadow-md animate-pulse">
-                        <div className="flex items-center gap-2">
-                            <AlertTriangle className="w-5 h-5" />
-                            <div>
-                                <p className="font-bold">Rate Limit Warning</p>
-                                <p>{warningMessage}</p>
+                    <div className="bg-amber-100 border-l-4 border-amber-500 text-amber-700 p-4 rounded shadow-md">
+                        <div className="flex items-center justify-between gap-4">
+                            <div className="flex items-center gap-2">
+                                <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+                                <div>
+                                    <p className="font-bold">Rate Limit Warning</p>
+                                    <p className="text-sm">{warningMessage}</p>
+                                </div>
                             </div>
+                            {showUsePaidButton && hasPaidKeys() && (
+                                <button
+                                    onClick={() => {
+                                        if (skipToPaidKey()) {
+                                            setWarningMessage('Switched to Paid API key. Retrying...');
+                                            setShowUsePaidButton(false);
+                                        }
+                                    }}
+                                    className="px-4 py-2 bg-amber-600 text-white font-semibold rounded-lg hover:bg-amber-700 transition-colors flex items-center gap-2 whitespace-nowrap"
+                                >
+                                    <span>💰</span>
+                                    Use Paid API
+                                </button>
+                            )}
                         </div>
                     </div>
                 )}
 
                 {/* Progress Tracking */}
                 {isTranslating && (
-                    <ProgressTracker progress={progress} isTranslating={isTranslating} />
+                    <div className="space-y-4">
+                        <ProgressTracker progress={progress} isTranslating={isTranslating} />
+                        <div className="flex justify-end">
+                            <TokenStats usage={{
+                                input: sessionTokenUsage.inputTokens,
+                                output: sessionTokenUsage.outputTokens,
+                                total: sessionTokenUsage.totalTokens
+                            }} />
+                        </div>
+                    </div>
                 )}
 
                 {/* Start Translation Button */}
@@ -517,12 +610,12 @@ export default function App() {
                                             Chunk {idx + 1}
                                         </span>
                                         <span className="text-xs text-slate-400">
-                                            {chunk.content.split(/\s+/).length} words
+                                            {chunk.text.split(/\s+/).length} words
                                         </span>
                                     </div>
                                     <p className="text-sm text-slate-700 line-clamp-3">
-                                        {chunk.content.substring(0, 300)}
-                                        {chunk.content.length > 300 && '...'}
+                                        {chunk.text.substring(0, 300)}
+                                        {chunk.text.length > 300 && '...'}
                                     </p>
                                 </div>
                             ))}

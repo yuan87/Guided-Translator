@@ -628,11 +628,16 @@ Format:
 
 /**
  * Extract structured content from File (PDF or Markdown)
+ * @param file - The file to extract content from
+ * @param apiKeys - Gemini API keys for AI vision parsing
+ * @param progressCallback - Progress callback for UI updates
+ * @param useMinerU - If true, use MinerU cloud API for PDF extraction (default: false)
  */
 export async function extractStructuredContent(
     file: File,
     apiKeys?: string | string[],
-    progressCallback?: (current: number, total: number) => void
+    progressCallback?: (current: number, total: number) => void,
+    useMinerU: boolean = false
 ): Promise<DocumentStructure> {
     // Handle Markdown files separately
     if (file.name.endsWith('.md') || file.type === 'text/markdown') {
@@ -640,8 +645,19 @@ export async function extractStructuredContent(
         return extractMarkdown(file);
     }
 
+    // Use MinerU for PDF extraction if enabled
+    if (useMinerU && (file.type === 'application/pdf' || file.name.endsWith('.pdf'))) {
+        const { extractWithMinerU, isMineruConfigured } = await import('./mineruService');
 
-    // Handle PDF files
+        if (!isMineruConfigured()) {
+            console.warn('[MinerU] API key not configured, falling back to legacy parser');
+        } else {
+            console.log('[MinerU] Using MinerU cloud API for PDF extraction...');
+            return extractWithMinerU(file, progressCallback);
+        }
+    }
+
+    // Handle PDF files with legacy/hybrid parsing
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
