@@ -4,16 +4,23 @@ import { FileUp, File, Check, AlertCircle, Loader2 } from 'lucide-react';
 import type { DocumentStructure } from '../types';
 import { extractStructuredContent } from '../services/documentParser';
 
+interface ApiKeyConfig {
+    key: string;
+    isPaid: boolean;
+}
+
 interface DocumentUploadProps {
     onDocumentLoaded: (doc: DocumentStructure) => void;
     currentDocument: DocumentStructure | null;
+    apiKeys?: string[] | ApiKeyConfig[];
 }
 
-export default function DocumentUpload({ onDocumentLoaded, currentDocument }: DocumentUploadProps) {
+export default function DocumentUpload({ onDocumentLoaded, currentDocument, apiKeys }: DocumentUploadProps) {
     const [isDragging, setIsDragging] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [progress, setProgress] = useState({ current: 0, total: 0 });
     const [error, setError] = useState<string | null>(null);
+    const [useMinerU, setUseMinerU] = useState(true); // MinerU enabled by default
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const handleDragOver = (e: React.DragEvent) => {
@@ -58,9 +65,16 @@ export default function DocumentUpload({ onDocumentLoaded, currentDocument }: Do
         setProgress({ current: 0, total: 0 });
 
         try {
-            const doc = await extractStructuredContent(file, (current, total) => {
+            // Normalize apiKeys to string[] (extract just the key property if ApiKeyConfig[])
+            const keyStrings = apiKeys && apiKeys.length > 0
+                ? (typeof apiKeys[0] === 'string'
+                    ? apiKeys as string[]
+                    : (apiKeys as ApiKeyConfig[]).map(k => k.key))
+                : undefined;
+
+            const doc = await extractStructuredContent(file, keyStrings, (current, total) => {
                 setProgress({ current, total });
-            });
+            }, useMinerU);
 
             if (doc.language !== 'en') {
                 setError(`Warning: Document appears to be in ${doc.language === 'zh' ? 'Chinese' : 'an unknown language'}. Please upload an English document.`);
@@ -94,6 +108,16 @@ export default function DocumentUpload({ onDocumentLoaded, currentDocument }: Do
                     <h3 className="text-lg font-semibold text-slate-800 mb-2">
                         {progress.total > 0 ? 'Analyzing Document' : 'Processing File'}
                     </h3>
+
+                    {/* AI Vision Active Indicator */}
+                    {apiKeys && apiKeys.length > 0 && apiKeys[0] && (
+                        <div className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-500 to-blue-500 text-white text-xs font-medium rounded-full mb-3 animate-pulse">
+                            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                                <path d="M10 2a.75.75 0 01.75.75v1.5a.75.75 0 01-1.5 0v-1.5A.75.75 0 0110 2zM10 15a.75.75 0 01.75.75v1.5a.75.75 0 01-1.5 0v-1.5A.75.75 0 0110 15zM2 10a.75.75 0 01.75-.75h1.5a.75.75 0 010 1.5h-1.5A.75.75 0 012 10zM15.75 10a.75.75 0 01.75-.75h1.5a.75.75 0 010 1.5h-1.5a.75.75 0 01-.75-.75zM4.343 4.343a.75.75 0 011.06 0l1.06 1.06a.75.75 0 11-1.06 1.06l-1.06-1.06a.75.75 0 010-1.06zM14.596 14.596a.75.75 0 011.06 0l1.06 1.06a.75.75 0 11-1.06 1.06l-1.06-1.06a.75.75 0 010-1.06zM4.343 15.657a.75.75 0 010-1.06l1.06-1.06a.75.75 0 111.06 1.06l-1.06 1.06a.75.75 0 01-1.06 0zM14.596 5.404a.75.75 0 010-1.06l1.06-1.06a.75.75 0 111.06 1.06l-1.06 1.06a.75.75 0 01-1.06 0z" />
+                            </svg>
+                            AI Vision Active {apiKeys.length > 1 && `(${apiKeys.length} keys)`}
+                        </div>
+                    )}
 
                     <p className="text-slate-600 mb-6 max-w-xs mx-auto">
                         {progress.total > 0
@@ -129,6 +153,20 @@ export default function DocumentUpload({ onDocumentLoaded, currentDocument }: Do
                         </button>
                     </p>
                     <p className="text-sm text-gray-500">Maximum file size: 50MB</p>
+
+                    {/* MinerU Toggle */}
+                    <label className="mt-4 flex items-center gap-2 cursor-pointer bg-gray-50 px-4 py-2 rounded-lg border border-gray-200 hover:bg-gray-100 transition-colors">
+                        <input
+                            type="checkbox"
+                            checked={useMinerU}
+                            onChange={(e) => setUseMinerU(e.target.checked)}
+                            className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                        />
+                        <span className="text-sm text-gray-700">
+                            Use MinerU <span className="text-gray-500">(Recommended for complex PDFs)</span>
+                        </span>
+                    </label>
+
                     <input
                         ref={fileInputRef}
                         type="file"

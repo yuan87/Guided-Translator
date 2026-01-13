@@ -8,6 +8,17 @@ import type { DocumentStructure } from '../types';
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 /**
+ * Page extraction result for streaming
+ */
+export interface PageExtractionResult {
+    pageNum: number;
+    totalPages: number;
+    content: string;
+    complexity: 'simple' | 'complex' | 'table';
+    confidence?: number;
+}
+
+/**
  * Layout analysis thresholds
  */
 interface LayoutThresholds {
@@ -172,143 +183,627 @@ export async function extractMarkdown(file: File): Promise<DocumentStructure> {
 }
 
 /**
- * Extract structured content from File (PDF or Markdown)
+ * Extract text from a single PDF page using legacy rule-based parser
+ * Used for simple pages in hybrid routing for speed and cost savings
  */
-export async function extractStructuredContent(
-    file: File,
-    onProgress?: (current: number, total: number) => void
-): Promise<DocumentStructure> {
+async function extractTextLegacy(page: any): Promise<string> {
+    const textContent = await page.getTextContent();
+    const thresholds = analyzeDocumentLayout(textContent);
+    const leftMargin = calculateLeftMargin(textContent);
 
-    // Handle Markdown files
-    if (file.name.endsWith('.md') || file.type === 'text/markdown') {
-        if (onProgress) onProgress(1, 1); // Immediate completion for text files
-        return extractMarkdown(file);
-    }
+    let lastY = -1;
+    let lastX = 0;
+    let lastWidth = 0;
+    let currentLine = '';
+    let currentIndent = 0;
+    const lines: string[] = [];
+    const rawItems = textContent.items as any[];
 
-    // Handle PDF files
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    for (const item of rawItems) {
+        const text = item.str;
+        if (!text.trim()) continue;
 
-    let fullText = '';
+        const y = item.transform[5];
+        const x = item.transform[4];
+        const height = item.height || 12;
+        const isHeading = height > 12;
+        const relativeX = Math.max(0, x - leftMargin);
+        const indentLevel = Math.floor(relativeX / 20);
 
-    for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
+        if (lastY === -1) {
+            currentLine = text;
+            currentIndent = indentLevel;
+            lastY = y;
+            lastX = x;
+            lastWidth = height > 0 ? (item.width || text.length * 6) : 0;
+        } else {
+            const verticalGap = Math.abs(y - lastY);
 
-        // Calculate adaptive thresholds for this page
-        const thresholds = analyzeDocumentLayout(textContent);
-        const leftMargin = calculateLeftMargin(textContent);
+            if (verticalGap < thresholds.sameLine) {
+                const textWidth = item.width || (text.length * 6);
+                const currentX = item.transform[4];
+                const gapX = currentX - (lastX + lastWidth);
 
-        // Smart text extraction with position-based line merging
-        let lastY = -1;
-        let lastX = 0;
-        let lastWidth = 0;
-        let currentLine = '';
-        let currentIndent = 0;
-        const lines: string[] = [];
+                if (currentLine && !currentLine.endsWith('-') && !text.startsWith(' ')) {
+                    if (gapX > 30) {
+                        currentLine += ' | ' + text;
+                    } else {
+                        currentLine += ' ' + text;
+                    }
+                } else if (currentLine.endsWith('-')) {
+                    if (text[0] && text[0] === text[0].toLowerCase()) {
+                        currentLine = currentLine.slice(0, -1) + text;
+                    } else {
+                        currentLine += text;
+                    }
+                } else {
+                    currentLine += text;
+                }
 
-        // Pre-process items to identifying conceptual lines
-        // This handles cases where PDF splits a single visual line into multiple items
-        const rawItems = textContent.items as any[];
-
-        for (let j = 0; j < rawItems.length; j++) {
-            const item = rawItems[j];
-            const text = item.str;
-
-            if (!text.trim()) continue;
-
-            // Get Y position from transform matrix (index 5)
-            // PDF coordinates: (0,0) is bottom-left, so higher Y is higher up the page.
-            // However, we usually process top-to-bottom.
-            // Let's rely on the relative difference.
-            const y = item.transform[5];
-            const x = item.transform[4];
-
-            const height = item.height || 12;
-            const isHeading = height > 12;
-
-            // Calculate indent level (approx 20px per level)
-            const relativeX = Math.max(0, x - leftMargin);
-            const indentLevel = Math.floor(relativeX / 20);
-
-            if (lastY === -1) {
-                // First item
+                lastX = currentX;
+                lastWidth = textWidth;
+            } else {
+                if (currentLine.trim()) {
+                    const indentString = currentIndent > 0 ? '  '.repeat(currentIndent) : '';
+                    const formattedLine = isHeading ? `## ${currentLine}` : `${indentString}${currentLine}`;
+                    lines.push(formattedLine);
+                }
+                if (verticalGap > thresholds.paragraphBreak) {
+                    lines.push('');
+                }
                 currentLine = text;
                 currentIndent = indentLevel;
                 lastY = y;
                 lastX = x;
-                lastWidth = height > 0 ? (item.width || text.length * 6) : 0;
+                lastWidth = item.width || (text.length * 6);
+            }
+        }
+    }
+
+    if (currentLine.trim()) {
+        const indentString = currentIndent > 0 ? '  '.repeat(currentIndent) : '';
+        lines.push(indentString + currentLine);
+    }
+
+    return lines.join('\n');
+}
+
+/**
+ * Extract structured content from File (PDF or Markdown)
+ */
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+/**
+ * Analyze page complexity to determine optimal rendering and extraction method
+ * Returns: 'simple' (text only), 'complex' (mixed), or 'table' (table-heavy)
+ */
+async function analyzePageComplexity(page: any): Promise<'simple' | 'complex' | 'table'> {
+    const textContent = await page.getTextContent();
+    const items = textContent.items as any[];
+
+    if (items.length === 0) return 'simple';
+
+    // Detect tables by analyzing spatial gaps (multiple distinct X positions)
+    const xPositions = items.map((i: any) => Math.round(i.transform[4] / 10) * 10);
+    const uniqueColumns = new Set(xPositions).size;
+
+    // Heuristics for complexity:
+    // - More than 6 distinct column positions = likely table-heavy
+    // - More than 4 columns = complex (mixed content)
+    // - More than 300 text items = dense content
+    const hasTable = uniqueColumns > 6;
+    const isComplex = uniqueColumns > 4;
+    const isDense = items.length > 300;
+
+    if (hasTable) return 'table';
+    if (isComplex || isDense) return 'complex';
+    return 'simple';
+}
+
+/**
+ * Convert PDF page to base64 image with adaptive quality
+ * Higher resolution for complex pages (tables, formulas)
+ */
+async function convertPageToImage(page: any): Promise<string> {
+    // Analyze page complexity
+    const complexity = await analyzePageComplexity(page);
+
+    // Dynamic scaling: complex pages get higher resolution
+    const scale = complexity === 'complex' ? 2.0 : 1.5;
+    const quality = complexity === 'complex' ? 0.9 : 0.8;
+
+    console.log(`Page rendering: ${complexity} → scale ${scale}, quality ${quality}`);
+
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    canvas.height = viewport.height;
+    canvas.width = viewport.width;
+
+    await page.render({
+        canvasContext: context,
+        viewport: viewport
+    }).promise;
+
+    // Convert to base64 (JPEG with adaptive quality)
+    const base64 = canvas.toDataURL('image/jpeg', quality);
+    return base64.split(',')[1]; // Remove prefix
+}
+
+/**
+ * Domain-specific prompt for technical standard documents
+ * Uses context engineering: concise core instructions + structured format
+ */
+const TECHNICAL_STANDARD_PROMPT = `# PDF Page → Markdown Transcription
+
+## Instructions
+1. Transcribe this technical document page into Markdown
+2. Preserve exact structure: headers (##/###), tables, lists, formulas
+3. Do NOT summarize - output verbatim content only
+
+## Format Rules
+- Headers: ## Main | ### Sub | #### Detail
+- Tables: | Col1 | Col2 | with alignment row |---|---|
+- Formulas: \`inline\` or \`\`\`block\`\`\`
+- Multi-column: process left-to-right, top-to-bottom
+
+## Output
+Return ONLY the Markdown. No commentary.`;
+
+/**
+ * Specialized prompt for table-heavy pages
+ * Uses context engineering: focused instructions for table accuracy
+ */
+const TABLE_EXTRACTION_PROMPT = `# Table-Focused Markdown Extraction
+
+## Task
+Extract ALL tables and surrounding context from this page.
+
+## Table Rules
+1. Use | Col1 | Col2 | syntax with |---|---| alignment row
+2. Preserve ALL columns - never merge or skip
+3. Multi-line cells: join with space, keep on one row
+4. Empty cells: use "-" not blank
+5. Uncertain values: use "?" with best guess
+
+## Context
+Include headers/text immediately before/after tables.
+
+## Output
+Markdown only. No commentary.`;
+
+/**
+ * Validation prompt for checking extraction quality
+ * Uses context engineering: concise structured validation request
+ */
+const VALIDATION_PROMPT = `# Extraction Validation
+
+## Task
+Compare the Markdown extraction to the original image.
+
+## Check For
+1. Missing headers or sections
+2. Malformed/incomplete tables
+3. Lost list items or formulas
+
+## Response Format (JSON only)
+{"isValid": true/false, "confidence": 0-100, "issues": ["issue1", "issue2"]}`;
+
+/**
+ * Validation result interface
+ */
+interface ValidationResult {
+    isValid: boolean;
+    confidence: number;
+    issues: string[];
+}
+
+/**
+ * Validate extracted content by comparing to original image
+ * Uses a second LLM pass to catch extraction errors
+ */
+async function validateExtractedContent(
+    markdown: string,
+    imageBase64: string,
+    apiKey: string
+): Promise<ValidationResult> {
+    try {
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+        const validationRequest = `${VALIDATION_PROMPT}
+
+## Extracted Markdown
+\`\`\`
+${markdown.substring(0, 2000)}
+\`\`\`
+
+Now validate against the original image:`;
+
+        const imagePart = {
+            inlineData: { data: imageBase64, mimeType: "image/jpeg" }
+        };
+
+        const result = await model.generateContent([validationRequest, imagePart]);
+        const responseText = result.response.text();
+
+        // Parse JSON response
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            return {
+                isValid: parsed.isValid ?? true,
+                confidence: parsed.confidence ?? 80,
+                issues: parsed.issues ?? []
+            };
+        }
+
+        // Default if parsing fails
+        return { isValid: true, confidence: 70, issues: [] };
+    } catch (error) {
+        console.warn("Validation failed, assuming valid:", error);
+        return { isValid: true, confidence: 50, issues: ["Validation skipped due to error"] };
+    }
+}
+
+/**
+ * Run an AI task with key rotation and failover
+ * Tries each key in the pool until success or all fail
+ */
+async function runWithFailover<T>(
+    keys: string[],
+    task: (model: any, apiKey: string) => Promise<T>
+): Promise<T> {
+    const errors: any[] = [];
+
+    for (const key of keys) {
+        try {
+            const genAI = new GoogleGenerativeAI(key);
+            const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+            return await task(model, key);
+        } catch (error) {
+            console.warn(`API call failed with key: ${key.substring(0, 8)}... - Trying next key`, error);
+            errors.push(error);
+        }
+    }
+
+    throw new Error(`All API keys failed: ${errors.map(e => e.message).join('; ')}`);
+}
+
+/**
+ * Streaming extraction generator for progressive UI updates
+ * Yields page-by-page results as they complete
+ */
+export async function* extractStructuredContentStreaming(
+    file: File,
+    apiKeys: string | string[]
+): AsyncGenerator<PageExtractionResult> {
+    const keys = Array.isArray(apiKeys) ? apiKeys : [apiKeys];
+
+    // Only works for PDFs with at least one API key
+    if (!file.name.endsWith('.pdf') || keys.length === 0 || !keys[0]) {
+        return;
+    }
+
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const complexity = await analyzePageComplexity(page);
+
+        let content: string;
+        let confidence = 80;
+
+        if (complexity === 'simple') {
+            // Simple → Legacy (no API call needed)
+            content = await extractTextLegacy(page);
+            confidence = 90; // High confidence for simple text
+        } else {
+            // Complex/Table → AI Vision
+            const imageBase64 = await convertPageToImage(page);
+            const prompt = complexity === 'table' ? TABLE_EXTRACTION_PROMPT : TECHNICAL_STANDARD_PROMPT;
+
+            const imagePart = {
+                inlineData: { data: imageBase64, mimeType: "image/jpeg" }
+            };
+
+            try {
+                content = await runWithFailover(keys, async (model, key) => {
+                    const result = await model.generateContent([prompt, imagePart]);
+                    const text = result.response.text();
+
+                    // Optional: Run validation for complex pages
+                    if (complexity === 'table') {
+                        const validation = await validateExtractedContent(text, imageBase64, key);
+                        confidence = validation.confidence;
+                    }
+                    return text;
+                });
+            } catch (failoverError) {
+                console.warn(`All AI keys failed for page ${i}, falling back to legacy:`, failoverError);
+                content = await extractTextLegacy(page);
+                confidence = 40; // Low confidence for fallback content on a complex page
+            }
+
+            // Rate limiting
+            await new Promise(resolve => setTimeout(resolve, 300));
+        }
+
+        yield {
+            pageNum: i,
+            totalPages: pdf.numPages,
+            content,
+            complexity,
+            confidence
+        };
+    }
+}
+
+/**
+ * Extract text from image using Gemini API (single page)
+ * @deprecated Prefer extractTextWithGeminiBatch for better performance
+ * Kept as fallback for error recovery scenarios
+ */
+// @ts-expect-error - Kept as fallback function, not currently used
+async function extractTextWithGemini(imageBase64: string, apiKey: string): Promise<string> {
+    try {
+        const genAI = new GoogleGenerativeAI(apiKey);
+        // Use flash model for speed and cost effectiveness
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+        const imagePart = {
+            inlineData: {
+                data: imageBase64,
+                mimeType: "image/jpeg"
+            }
+        };
+
+        const result = await model.generateContent([TECHNICAL_STANDARD_PROMPT, imagePart]);
+        const response = await result.response;
+        return response.text();
+    } catch (error) {
+        console.error("Gemini Vision Extraction Failed:", error);
+        throw new Error("AI Visual Extraction failed. Please check your API key or try again.");
+    }
+}
+
+/**
+ * Extract text from multiple images using Gemini API (batched)
+ * Processes 2-4 pages in a single API call to reduce latency and cost
+ * @deprecated Currently unused due to hybrid routing, kept for future batch mode option
+ */
+// @ts-expect-error - Kept for future batch processing mode
+async function extractTextWithGeminiBatch(imageBase64Array: string[], apiKey: string): Promise<string[]> {
+    try {
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+        // Construct batch prompt
+        const batchPrompt = `${TECHNICAL_STANDARD_PROMPT}
+
+IMPORTANT: You are processing ${imageBase64Array.length} consecutive pages from the same document.
+- Process each page separately
+- After each page's content, insert exactly this separator: ---PAGE_BREAK---
+- Maintain page order (page 1, then page 2, etc.)
+
+Format:
+[Page 1 content]
+---PAGE_BREAK---
+[Page 2 content]
+---PAGE_BREAK---
+[Page 3 content]`;
+
+        // Create image parts array
+        const imageParts = imageBase64Array.map(data => ({
+            inlineData: {
+                data: data,
+                mimeType: "image/jpeg"
+            }
+        }));
+
+        // Send batch request
+        const result = await model.generateContent([batchPrompt, ...imageParts]);
+        const response = await result.response;
+        const fullText = response.text();
+
+        // Split by separator and clean up
+        const pages = fullText.split('---PAGE_BREAK---')
+            .map(page => page.trim())
+            .filter(page => page.length > 0);
+
+        // Ensure we got the expected number of pages
+        if (pages.length !== imageBase64Array.length) {
+            console.warn(`Expected ${imageBase64Array.length} pages, got ${pages.length}. Using fallback.`);
+            // Fallback: return the full text as a single page if parsing failed
+            return [fullText];
+        }
+
+        return pages;
+    } catch (error) {
+        console.error("Gemini Vision Batch Extraction Failed:", error);
+        throw new Error("AI Visual Batch Extraction failed. Please check your API key or try again.");
+    }
+}
+
+/**
+ * Extract structured content from File (PDF or Markdown)
+ * @param file - The file to extract content from
+ * @param apiKeys - Gemini API keys for AI vision parsing
+ * @param progressCallback - Progress callback for UI updates
+ * @param useMinerU - If true, use MinerU cloud API for PDF extraction (default: false)
+ */
+export async function extractStructuredContent(
+    file: File,
+    apiKeys?: string | string[],
+    progressCallback?: (current: number, total: number) => void,
+    useMinerU: boolean = false
+): Promise<DocumentStructure> {
+    // Handle Markdown files separately
+    if (file.name.endsWith('.md') || file.type === 'text/markdown') {
+        if (progressCallback) progressCallback(1, 1);
+        return extractMarkdown(file);
+    }
+
+    // Use MinerU for PDF extraction if enabled
+    if (useMinerU && (file.type === 'application/pdf' || file.name.endsWith('.pdf'))) {
+        const { extractWithMinerU, isMineruConfigured } = await import('./mineruService');
+
+        if (!isMineruConfigured()) {
+            console.warn('[MinerU] API key not configured, falling back to legacy parser');
+        } else {
+            console.log('[MinerU] Using MinerU cloud API for PDF extraction...');
+            return extractWithMinerU(file, progressCallback);
+        }
+    }
+
+    // Handle PDF files with legacy/hybrid parsing
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+    let fullText = '';
+    const keys = Array.isArray(apiKeys) ? apiKeys : (apiKeys ? [apiKeys] : []);
+
+    // If API key is present, use Hybrid Visual AI Parsing
+    if (keys.length > 0 && keys[0]) {
+        console.log(`Using Hybrid Parsing with Key Rotation (${keys.length} keys available)...`);
+
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+
+            // Analyze page complexity to choose extraction method
+            const complexity = await analyzePageComplexity(page);
+
+            let pageText: string;
+
+            if (complexity === 'table' || complexity === 'complex') {
+                const isTable = complexity === 'table';
+                console.log(`Page ${i}: ${complexity} → AI Vision (${isTable ? 'Table' : 'Standard'} Mode)`);
+                const imageBase64 = await convertPageToImage(page);
+
+                const imagePart = {
+                    inlineData: { data: imageBase64, mimeType: "image/jpeg" }
+                };
+
+                try {
+                    pageText = await runWithFailover(keys, async (model) => {
+                        const prompt = isTable ? TABLE_EXTRACTION_PROMPT : TECHNICAL_STANDARD_PROMPT;
+                        const result = await model.generateContent([prompt, imagePart]);
+                        return result.response.text();
+                    });
+                } catch (failoverError) {
+                    console.warn(`All AI keys failed for page ${i}, falling back to legacy:`, failoverError);
+                    pageText = await extractTextLegacy(page);
+                }
+
+                await new Promise(resolve => setTimeout(resolve, 500));
             } else {
-                const verticalGap = Math.abs(y - lastY);
+                // Simple page → Legacy for speed & cost savings
+                console.log(`Page ${i}: Simple → Legacy Parser`);
+                pageText = await extractTextLegacy(page);
+            }
 
-                if (verticalGap < thresholds.sameLine) {
-                    // Same line - check horizontal layout
-                    const textWidth = item.width || (text.length * 6); // Estimate if missing
-                    const currentX = item.transform[4];
-                    const gapX = currentX - (lastX + lastWidth);
+            fullText += pageText + '\n\n';
 
-                    if (currentLine && !currentLine.endsWith('-') && !text.startsWith(' ')) {
-                        // DETECT TABLE/COLUMN GAP
-                        // If gap is significant (> 30 units), treat as column separator
-                        if (gapX > 30) {
-                            currentLine += ' | ' + text;
-                        } else {
-                            currentLine += ' ' + text;
-                        }
-                    } else if (currentLine.endsWith('-')) {
-                        // Handle hyphenation
-                        if (text[0] && text[0] === text[0].toLowerCase()) {
-                            currentLine = currentLine.slice(0, -1) + text; // Fix hyphenation
-                        } else {
-                            // Keep hyphen for compound words
-                            currentLine += text;
-                        }
-                    } else {
-                        currentLine += text;
-                    }
+            if (progressCallback) {
+                progressCallback(i, pdf.numPages);
+            }
+        }
+    } else {
+        // Fallback to Rule-Based Extraction (Legacy)
+        console.log("Using Legacy PDF.js Parsing (No API Key provided to parser)...");
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
 
-                    // Update tracking for horizontal gap detection
-                    lastX = currentX;
-                    lastWidth = textWidth;
-                } else {
-                    // Line break (either new line or paragraph break)
+            // Calculate adaptive thresholds for this page
+            const thresholds = analyzeDocumentLayout(textContent);
+            const leftMargin = calculateLeftMargin(textContent);
 
-                    // Push previous line
-                    if (currentLine.trim()) {
-                        const indentString = currentIndent > 0 ? '  '.repeat(currentIndent) : '';
-                        const formattedLine = isHeading ? `## ${currentLine}` : `${indentString}${currentLine}`;
-                        lines.push(formattedLine);
-                    }
+            // Smart text extraction with position-based line merging
+            let lastY = -1;
+            let lastX = 0;
+            let lastWidth = 0;
+            let currentLine = '';
+            let currentIndent = 0;
+            const lines: string[] = [];
+            const rawItems = textContent.items as any[];
 
-                    // Check if it's a paragraph break
-                    if (verticalGap > thresholds.paragraphBreak) {
-                        lines.push(''); // Empty line for paragraph break
-                    }
+            for (let j = 0; j < rawItems.length; j++) {
+                const item = rawItems[j];
+                const text = item.str;
 
+                if (!text.trim()) continue;
+
+                const y = item.transform[5];
+                const x = item.transform[4];
+                const height = item.height || 12;
+                const isHeading = height > 12;
+                const relativeX = Math.max(0, x - leftMargin);
+                const indentLevel = Math.floor(relativeX / 20);
+
+                if (lastY === -1) {
                     currentLine = text;
                     currentIndent = indentLevel;
                     lastY = y;
                     lastX = x;
-                    lastWidth = item.width || (text.length * 6);
+                    lastWidth = height > 0 ? (item.width || text.length * 6) : 0;
+                } else {
+                    const verticalGap = Math.abs(y - lastY);
+
+                    if (verticalGap < thresholds.sameLine) {
+                        const textWidth = item.width || (text.length * 6);
+                        const currentX = item.transform[4];
+                        const gapX = currentX - (lastX + lastWidth);
+
+                        if (currentLine && !currentLine.endsWith('-') && !text.startsWith(' ')) {
+                            if (gapX > 30) {
+                                currentLine += ' | ' + text;
+                            } else {
+                                currentLine += ' ' + text;
+                            }
+                        } else if (currentLine.endsWith('-')) {
+                            if (text[0] && text[0] === text[0].toLowerCase()) {
+                                currentLine = currentLine.slice(0, -1) + text;
+                            } else {
+                                currentLine += text;
+                            }
+                        } else {
+                            currentLine += text;
+                        }
+
+                        lastX = currentX;
+                        lastWidth = textWidth;
+                    } else {
+                        if (currentLine.trim()) {
+                            const indentString = currentIndent > 0 ? '  '.repeat(currentIndent) : '';
+                            const formattedLine = isHeading ? `## ${currentLine}` : `${indentString}${currentLine}`;
+                            lines.push(formattedLine);
+                        }
+                        if (verticalGap > thresholds.paragraphBreak) {
+                            lines.push('');
+                        }
+                        currentLine = text;
+                        currentIndent = indentLevel;
+                        lastY = y;
+                        lastX = x;
+                        lastWidth = item.width || (text.length * 6);
+                    }
                 }
             }
+
+            if (currentLine.trim()) {
+                const indentString = currentIndent > 0 ? '  '.repeat(currentIndent) : '';
+                lines.push(indentString + currentLine);
+            }
+
+            fullText += lines.join('\n') + '\n\n';
+
+            if (progressCallback) {
+                progressCallback(i, pdf.numPages);
+            }
+            await new Promise(resolve => setTimeout(resolve, 0));
         }
-
-        // Add remaining line
-        if (currentLine.trim()) {
-            const indentString = currentIndent > 0 ? '  '.repeat(currentIndent) : '';
-            lines.push(indentString + currentLine);
-        }
-
-        // Join lines with single newlines, double newlines preserved from empty strings
-        fullText += lines.join('\n') + '\n\n';
-
-        if (onProgress) {
-            onProgress(i, pdf.numPages);
-        }
-
-        // Yield control to main thread
-        await new Promise(resolve => setTimeout(resolve, 0));
     }
 
     const language = detectLanguage(fullText);

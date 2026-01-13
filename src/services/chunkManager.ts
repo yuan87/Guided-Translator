@@ -4,47 +4,92 @@
 import type { Chunk } from '../types';
 
 /**
+ * Clause pattern for EN/ISO standards
+ * Matches: 5, 5.1, 5.1.2, 5.1.2.3, A.1, B.2.3, etc.
+ */
+const CLAUSE_PATTERN = /^((?:\d+\.)*\d+|[A-Z]\.\d+(?:\.\d+)*)\s+/;
+
+/**
  * Split text into chunks for translation
+ * Uses clause-aware splitting for technical standards
  * Target: 500-1000 tokens per chunk
  */
 export function splitIntoChunks(text: string, maxTokens: number = 800): Chunk[] {
     const chunks: Chunk[] = [];
 
-    // Split into paragraphs first
-    const paragraphs = text.split(/\n\n+/).filter(p => p.trim());
+    // Split into lines first
+    const lines = text.split('\n');
 
-    let currentChunk = '';
-    let chunkPosition = 0;
+    // Group lines into clause sections
+    const sections: { clauseNumber: string | null; lines: string[] }[] = [];
+    let currentSection: { clauseNumber: string | null; lines: string[] } = { clauseNumber: null, lines: [] };
 
-    for (const paragraph of paragraphs) {
-        const estimatedTokens = estimateTokens(currentChunk + paragraph);
+    for (const line of lines) {
+        const clauseMatch = line.match(CLAUSE_PATTERN);
 
-        // If adding this paragraph exceeds limit, save current chunk
-        if (currentChunk && estimatedTokens > maxTokens) {
-            chunks.push(createChunk(currentChunk, chunkPosition++));
-            currentChunk = '';
-        }
-
-        // If single paragraph is too large, split it further
-        if (estimateTokens(paragraph) > maxTokens) {
-            // Split on sentence boundaries
-            const sentences = splitIntoSentences(paragraph);
-
-            for (const sentence of sentences) {
-                if (estimateTokens(currentChunk + sentence) > maxTokens && currentChunk) {
-                    chunks.push(createChunk(currentChunk, chunkPosition++));
-                    currentChunk = '';
-                }
-                currentChunk += sentence + ' ';
+        if (clauseMatch) {
+            // New clause detected - save current section and start new one
+            if (currentSection.lines.length > 0) {
+                sections.push(currentSection);
             }
+            currentSection = { clauseNumber: clauseMatch[1], lines: [line] };
         } else {
-            currentChunk += paragraph + '\n\n';
+            // Continue current section
+            currentSection.lines.push(line);
         }
     }
 
-    // Add remaining chunk
-    if (currentChunk.trim()) {
-        chunks.push(createChunk(currentChunk, chunkPosition));
+    // Don't forget the last section
+    if (currentSection.lines.length > 0) {
+        sections.push(currentSection);
+    }
+
+    // Now chunk each section
+    let chunkPosition = 0;
+
+    for (const section of sections) {
+        const sectionText = section.lines.join('\n').trim();
+        if (!sectionText) continue;
+
+        const sectionTokens = estimateTokens(sectionText);
+
+        if (sectionTokens <= maxTokens) {
+            // Section fits in one chunk
+            chunks.push(createChunk(sectionText, chunkPosition++, section.clauseNumber));
+        } else {
+            // Section too large - split by paragraphs within the section
+            const paragraphs = sectionText.split(/\n\n+/).filter(p => p.trim());
+            let currentChunkText = '';
+            let isFirstParagraph = true;
+
+            for (const paragraph of paragraphs) {
+                const combinedTokens = estimateTokens(currentChunkText + '\n\n' + paragraph);
+
+                if (currentChunkText && combinedTokens > maxTokens) {
+                    // Save current chunk, start new one
+                    chunks.push(createChunk(
+                        currentChunkText,
+                        chunkPosition++,
+                        isFirstParagraph ? section.clauseNumber : null
+                    ));
+                    currentChunkText = paragraph;
+                    isFirstParagraph = false;
+                } else {
+                    currentChunkText = currentChunkText
+                        ? currentChunkText + '\n\n' + paragraph
+                        : paragraph;
+                }
+            }
+
+            // Add remaining text
+            if (currentChunkText.trim()) {
+                chunks.push(createChunk(
+                    currentChunkText,
+                    chunkPosition++,
+                    isFirstParagraph ? section.clauseNumber : null
+                ));
+            }
+        }
     }
 
     return chunks;
@@ -53,7 +98,7 @@ export function splitIntoChunks(text: string, maxTokens: number = 800): Chunk[] 
 /**
  * Create a chunk object
  */
-function createChunk(text: string, position: number): Chunk {
+function createChunk(text: string, position: number, clauseNumber?: string | null): Chunk {
     const trimmedText = text.trim();
     const firstLine = trimmedText.split('\n')[0];
 
@@ -85,6 +130,9 @@ function createChunk(text: string, position: number): Chunk {
     if (indicators.numbered && indicators.short) headingScore += 3;
     if (indicators.capitalized && indicators.short && indicators.noPunctuation) headingScore += 2;
 
+    // Clause number also indicates heading
+    if (clauseNumber && indicators.short) headingScore += 3;
+
     // List detection
     const isList = /^[\-\*\u2022\d]+[\.\)]\s/.test(trimmedText) || trimmedText.startsWith('- ');
 
@@ -95,6 +143,11 @@ function createChunk(text: string, position: number): Chunk {
     let type: Chunk['type'] = 'paragraph';
     let metadata: Chunk['metadata'] = {};
 
+    // Add clause number to metadata if present
+    if (clauseNumber) {
+        metadata.clauseNumber = clauseNumber;
+    }
+
     if (headingScore >= 2) {
         type = 'heading';
         const headingMatch = trimmedText.match(/^(#{1,6})\s+(.+)/);
@@ -102,9 +155,13 @@ function createChunk(text: string, position: number): Chunk {
             metadata.level = headingMatch[1].length;
             metadata.heading = headingMatch[2];
         } else {
-            // Infer level from structure if possible, else default
+            // Infer level from clause number depth
             metadata.heading = firstLine.replace(/^#{1,6}\s+/, ''); // Clean up
-            metadata.level = indicators.markdown ? (trimmedText.match(/^#+/)?.[0].length || 2) : 2;
+            if (clauseNumber) {
+                metadata.level = clauseNumber.split('.').length;
+            } else {
+                metadata.level = indicators.markdown ? (trimmedText.match(/^#+/)?.[0].length || 2) : 2;
+            }
         }
     } else if (isList) {
         type = 'list';
@@ -119,22 +176,6 @@ function createChunk(text: string, position: number): Chunk {
         type,
         metadata
     };
-}
-
-/**
- * Split paragraph into sentences
- */
-function splitIntoSentences(text: string): string[] {
-    // Split on period, exclamation, question mark followed by space/newline
-    return text
-        .split(/([.!?]+[\s\n]+)/)
-        .reduce((acc: string[], curr, i, arr) => {
-            if (i % 2 === 0) {
-                acc.push(curr + (arr[i + 1] || ''));
-            }
-            return acc;
-        }, [])
-        .filter(s => s.trim());
 }
 
 /**
