@@ -629,27 +629,58 @@ Format:
 /**
  * Extract structured content from File (PDF or Markdown)
  * @param file - The file to extract content from
- * @param apiKeys - Gemini API keys for AI vision parsing
+ * @param apiKeys - Gemini API keys for AI vision parsing (legacy fallback)
  * @param progressCallback - Progress callback for UI updates
- * @param useMinerU - If true, use MinerU cloud API for PDF extraction (default: false)
+ * @param useMinerU - If true, use MinerU cloud API via backend (default: false)
+ * @param useBackend - If true, use backend API for PDF parsing (default: true)
  */
 export async function extractStructuredContent(
     file: File,
     apiKeys?: string | string[],
     progressCallback?: (current: number, total: number) => void,
-    useMinerU: boolean = false
+    useMinerU: boolean = false,
+    useBackend: boolean = true
 ): Promise<DocumentStructure> {
-    // Handle Markdown files separately
+    // Handle Markdown files separately (can be done client-side)
     if (file.name.endsWith('.md') || file.type === 'text/markdown') {
         if (progressCallback) progressCallback(1, 1);
         return extractMarkdown(file);
     }
 
-    // Use MinerU for PDF extraction if enabled
-    if (useMinerU && (file.type === 'application/pdf' || file.name.endsWith('.pdf'))) {
-        const { extractWithMinerU, isMineruConfigured } = await import('./mineruService');
+    // Use backend API for PDF extraction if enabled
+    if (useBackend && (file.type === 'application/pdf' || file.name.endsWith('.pdf'))) {
+        const { parsePdf } = await import('./apiClient');
 
-        if (!isMineruConfigured()) {
+        console.log('[Parser] Using backend API for PDF extraction...');
+        if (progressCallback) progressCallback(0, 100);
+
+        try {
+            const result = await parsePdf(file, useMinerU);
+
+            if (!result.success || !result.document) {
+                console.warn('[Parser] Backend parsing failed, falling back to legacy:', result.error);
+                // Fall through to legacy parsing below
+            } else {
+                if (progressCallback) progressCallback(100, 100);
+
+                return {
+                    text: result.document.text,
+                    pages: result.document.pages,
+                    wordCount: result.document.word_count,
+                    language: result.document.language
+                };
+            }
+        } catch (error) {
+            console.warn('[Parser] Backend API error, falling back to legacy:', error);
+            // Fall through to legacy parsing
+        }
+    }
+
+    // Legacy: Use MinerU directly (old path, kept for compatibility)
+    if (useMinerU && (file.type === 'application/pdf' || file.name.endsWith('.pdf'))) {
+        const { extractWithMinerU, isMineruConfiguredSync } = await import('./mineruService');
+
+        if (!isMineruConfiguredSync()) {
             console.warn('[MinerU] API key not configured, falling back to legacy parser');
         } else {
             console.log('[MinerU] Using MinerU cloud API for PDF extraction...');

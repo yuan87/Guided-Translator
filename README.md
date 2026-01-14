@@ -5,6 +5,7 @@
 ## 🚀 Key Features
 
 - **AI-Powered Visual Parsing**: Uses Gemini 1.5 Flash Vision to "read" PDF pages as images, ensuring complex layouts, tables, and multi-column structures are perfectly preserved in Markdown format.
+- **MinerU Cloud Integration**: Optionally leverage [MinerU](https://mineru.net)'s advanced PDF extraction engine for superior accuracy on complex technical documents with formulas and tables.
 - **Terminology Awareness**: Integrates CSV-based glossaries and learns from user edits to maintain consistency across technical translations.
 - **Agentic Editing Interface**: Analyzes manual edits to detect terminological improvements and offers to apply them throughout the document.
 - **Multi-Key Management**: Supports multiple Gemini API keys with automatic rate-limit switching to ensure uninterrupted long-document translation.
@@ -15,7 +16,7 @@
 
 - **Frontend**: React 19, Vite, TypeScript
 - **Styling**: Tailwind CSS
-- **PDF Processing**: PDF.js (Mozilla)
+- **PDF Processing**: PDF.js (Mozilla), MinerU Cloud API (optional)
 - **AI Models**: Google Gemini 2.0 Flash Experimental
 - **Icons**: Lucide React
 - **Serialization**: PapaParse (CSV), html2canvas/jspdf (Export)
@@ -26,6 +27,7 @@
 
 - Node.js (v18+)
 - A Google AI Studio API Key ([Get one here](https://aistudio.google.com/))
+- *Optional*: A MinerU API Key for enhanced PDF extraction ([Get one here](https://mineru.net))
 
 ### Installation
 
@@ -40,21 +42,27 @@
    npm install
    ```
 
-3. Start the development server:
+3. (Optional) Configure MinerU API key:
+   Create a `.env` file in the root directory:
+   ```bash
+   VITE_MINERU_API_KEY=your_api_key_here
+   ```
+
+4. Start the development server:
    ```bash
    npm run dev
    ```
 
-4. Open [http://localhost:5173](http://localhost:5173) in your browser.
+5. Open [http://localhost:5173](http://localhost:5173) in your browser.
 
 ## 📖 Usage Guide
 
 1. **Setup API Key**: Click on the **Key** icon in the header to add your Gemini API keys.
 2. **Load Glossary**: Upload a CSV glossary (format: `English Term, Chinese Term`) to guide the translation.
-3. **Upload Document**: Drag and drop a PDF or Markdown file.
+3. **Upload Document**: Drag and drop a PDF or Markdown file. Enable the **MinerU** toggle for complex PDFs with tables and formulas.
 4. **Translate**: Hit "Start Translation". The app will process pages visually for maximum accuracy.
 5. **Refine**: After translation, enter "Edit & Refine Mode" to tweak results. The AI will learn from your corrections!
-6. **Export**: Export the final transalted document as PDF, Markdown, or Word.
+6. **Export**: Export the final translated document as PDF, Markdown, or Word.
 
 ## 🔄 Processing Flow
 
@@ -64,27 +72,34 @@
 flowchart TD
     A[📄 Upload Document] --> B{File Type?}
     
-    B -->|PDF| C[PDF.js Extraction]
+    B -->|PDF| C{MinerU Enabled?}
     B -->|Markdown| D[Direct Text Read]
     
-    C --> E[For Each Page]
-    E --> F{Analyze Complexity}
+    C -->|Yes| E[☁️ MinerU Cloud API]
+    C -->|No| F[📚 PDF.js Extraction]
     
-    F -->|Simple Text| G[Legacy Parser]
-    F -->|Complex/Tables| H[AI Vision Parser]
+    E --> G[Advanced OCR + Layout Analysis]
+    G --> H[Structured Markdown]
     
-    G --> I[Rule-based Layout Analysis]
-    H --> J[Gemini Flash Vision]
-    J --> K[Image → Markdown]
+    F --> I[For Each Page]
+    I --> J{Analyze Complexity}
     
-    I --> L[Merge Pages]
-    K --> L
+    J -->|Simple Text| K[Legacy Parser]
+    J -->|Complex/Tables| L[AI Vision Parser]
     
-    D --> M[Language Detection]
-    L --> M
+    K --> M[Rule-based Layout Analysis]
+    L --> N[Gemini Flash Vision]
+    N --> O[Image → Markdown]
     
-    M --> N[Split into Chunks]
-    N --> O[Ready for Translation]
+    M --> P[Merge Pages]
+    O --> P
+    H --> P
+    
+    D --> Q[Language Detection]
+    P --> Q
+    
+    Q --> R[Split into Chunks]
+    R --> S[Ready for Translation]
 ```
 
 ### Page Complexity Analysis

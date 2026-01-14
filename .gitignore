@@ -6,9 +6,12 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+
+# Environment files
 .env
 .env.local
 .env.*.local
+backend/.env
 
 node_modules
 dist
@@ -34,3 +37,17 @@ coverage
 
 # OS
 Thumbs.db
+
+# Python Backend
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/.pytest_cache/
+*.pyc
+__pycache__/
+
+# Tauri
+src-tauri/target/
+src-tauri/WixTools/
+src-tauri/icons/*.ico
