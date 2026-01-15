@@ -10,6 +10,7 @@ import RefinementSuggestions from './components/RefinementSuggestions';
 import UserGlossaryPanel from './components/UserGlossaryPanel';
 import SavedProjectsPanel from './components/SavedProjectsPanel'; // Import SavedProjectsPanel
 import ResumeModal from './components/ResumeModal';
+import DeveloperPanel from './components/DeveloperPanel'; // Import Developer Panel
 import { extractStandardTitle } from './services/documentParser';
 import { splitIntoChunks } from './services/chunkManager';
 import { translateChunks, calculateCoverage, setApiKeys, hasPaidKeys, skipToPaidKey } from './services/geminiService';
@@ -284,6 +285,9 @@ export default function App() {
                 }));
             }
 
+            // INCREMENTAL UPDATE - Update UI immediately as each chunk completes
+            setTranslatedChunks(prev => [...prev, chunkResult]);
+
             // INCREMENTAL SAVE - Persist chunk immediately after translation
             if (currentProject) {
                 const chunkData: import('./types').ChunkData = {
@@ -301,9 +305,9 @@ export default function App() {
             }
         });
 
-        const finalResults = [...translatedChunks, ...newResults];
-        setTranslatedChunks(finalResults);
-        const finalCoverage = calculateCoverage(finalResults, glossary);
+        // Note: translatedChunks state is already updated incrementally via onChunkComplete
+        // Just calculate coverage based on current state
+        const finalCoverage = calculateCoverage(translatedChunks, glossary);
 
         setProgress(prev => ({
             ...prev,
@@ -705,6 +709,9 @@ export default function App() {
                     }}
                 />
             )}
+
+            {/* Developer Panel - Shows API status */}
+            <DeveloperPanel />
         </div>
     );
 }

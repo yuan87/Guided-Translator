@@ -70,6 +70,17 @@ export async function getKeyStatus(): Promise<ApiKeyStatus> {
     return apiFetch<ApiKeyStatus>('/api/keys/status');
 }
 
+export interface GeminiTestResult {
+    status: 'ok' | 'error' | 'rate_limited' | 'no_key';
+    message: string;
+    rate_limited: boolean;
+    response?: string;
+}
+
+export async function testGemini(): Promise<GeminiTestResult> {
+    return apiFetch<GeminiTestResult>('/api/keys/test-gemini');
+}
+
 // ============ Document Parsing ============
 
 export interface DocumentStructure {
@@ -226,46 +237,63 @@ export async function translateBatchStreaming(
 
         buffer += decoder.decode(value, { stream: true });
 
-        // Parse SSE events from buffer
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+        // SSE events are separated by double newlines
+        // Each event has: event: <type>\ndata: <json>\n\n
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || ''; // Keep incomplete event in buffer
 
-        for (const line of lines) {
-            if (line.startsWith('data:')) {
-                const jsonStr = line.slice(5).trim();
-                if (!jsonStr) continue;
+        for (const eventBlock of events) {
+            if (!eventBlock.trim()) continue;
 
-                try {
-                    const event: TranslationProgress = JSON.parse(jsonStr);
+            const lines = eventBlock.split('\n');
+            let eventData = '';
 
-                    switch (event.event) {
-                        case 'progress':
-                            onProgress?.(event.current, event.total);
-                            break;
-
-                        case 'chunk_complete':
-                            if (event.translated_chunk) {
-                                results.push(event.translated_chunk);
-                                onChunkComplete?.(event.translated_chunk);
-                            }
-                            onProgress?.(event.current, event.total);
-                            break;
-
-                        case 'error':
-                            onError?.(event.chunk_id || 'unknown', event.error_message || 'Unknown error');
-                            break;
-
-                        case 'done':
-                            // Translation complete
-                            break;
-                    }
-                } catch (e) {
-                    console.warn('Failed to parse SSE event:', line, e);
+            for (const line of lines) {
+                if (line.startsWith('data:')) {
+                    eventData = line.slice(5).trim();
+                } else if (line.startsWith('data: ')) {
+                    eventData = line.slice(6).trim();
                 }
+            }
+
+            if (!eventData) continue;
+
+            try {
+                const event: TranslationProgress = JSON.parse(eventData);
+
+                console.log('[SSE] Event received:', event.event, event.chunk_id);
+
+                switch (event.event) {
+                    case 'progress':
+                        onProgress?.(event.current, event.total);
+                        break;
+
+                    case 'chunk_complete':
+                        if (event.translated_chunk) {
+                            console.log('[SSE] Chunk translated:', event.translated_chunk.id,
+                                'Length:', event.translated_chunk.translated?.length);
+                            results.push(event.translated_chunk);
+                            onChunkComplete?.(event.translated_chunk);
+                        }
+                        onProgress?.(event.current, event.total);
+                        break;
+
+                    case 'error':
+                        console.error('[SSE] Translation error:', event.error_message);
+                        onError?.(event.chunk_id || 'unknown', event.error_message || 'Unknown error');
+                        break;
+
+                    case 'done':
+                        console.log('[SSE] Translation complete, total chunks:', results.length);
+                        break;
+                }
+            } catch (e) {
+                console.warn('[SSE] Failed to parse event:', eventBlock, e);
             }
         }
     }
 
+    console.log('[SSE] Returning results:', results.length, 'chunks');
     return results;
 }
 

@@ -19,11 +19,11 @@ from config import settings
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
     # Startup
-    print(f"🚀 Starting Guided Translator Backend v1.0.0")
-    print(f"📍 API docs available at: http://localhost:8000/docs")
+    print("Starting Guided Translator Backend v1.0.0")
+    print("API docs available at: http://localhost:8000/docs")
     yield
     # Shutdown
-    print("👋 Shutting down backend...")
+    print("Shutting down backend...")
 
 
 app = FastAPI(
@@ -38,8 +38,11 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",  # Vite dev server
+        "http://127.0.0.1:5173",  # Vite dev server alt
         "http://localhost:1420",  # Tauri dev
+        "http://127.0.0.1:1420",  # Tauri dev alt
         "tauri://localhost",      # Tauri production
+        "*",                      # Allow all for development
     ],
     allow_credentials=True,
     allow_methods=["*"],

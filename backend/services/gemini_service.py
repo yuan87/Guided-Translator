@@ -120,7 +120,7 @@ async def translate_chunk(
     for attempt in range(max_retries):
         try:
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel("gemini-2.0-flash")
             
             if on_status:
                 on_status(f"Translating chunk {chunk.id}...")

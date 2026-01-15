@@ -62,3 +62,50 @@ def rotate_gemini_key() -> bool:
     current_key_index = (current_key_index + 1) % len(gemini_key_pool)
     update_api_keys(gemini_key=gemini_key_pool[current_key_index])
     return True
+
+
+@router.get("/test-gemini")
+async def test_gemini_connection():
+    """
+    Test Gemini API connectivity and check for rate limiting.
+    Makes a minimal API call to verify the key works.
+    """
+    import google.generativeai as genai
+    
+    api_key = get_current_gemini_key()
+    
+    if not api_key:
+        return {
+            "status": "no_key",
+            "message": "No Gemini API key configured",
+            "rate_limited": False
+        }
+    
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        
+        # Minimal test - just list models or do a tiny generation
+        response = model.generate_content(
+            "Say 'OK' in one word.",
+            generation_config=genai.types.GenerationConfig(
+                max_output_tokens=5
+            )
+        )
+        
+        return {
+            "status": "ok",
+            "message": "Gemini API is working",
+            "rate_limited": False,
+            "response": response.text[:50] if response.text else "No response"
+        }
+        
+    except Exception as e:
+        error_msg = str(e).lower()
+        is_rate_limited = "429" in error_msg or "rate" in error_msg or "quota" in error_msg
+        
+        return {
+            "status": "error" if not is_rate_limited else "rate_limited",
+            "message": str(e)[:200],
+            "rate_limited": is_rate_limited
+        }
