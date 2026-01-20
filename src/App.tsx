@@ -146,7 +146,10 @@ export default function App() {
     };
 
     const handleStartOver = async () => {
+        console.log('[DEBUG] handleStartOver called, pendingFile:', pendingFile ? 'EXISTS' : 'NULL');
         if (pendingFile) {
+            console.log('[DEBUG] pendingFile.text length:', pendingFile.text?.length || 0);
+
             // Create new Project
             const project: Project = {
                 id: crypto.randomUUID(),
@@ -161,13 +164,18 @@ export default function App() {
             setCurrentProject(project);
 
             // Process chunks
+            console.log('[DEBUG] About to call splitIntoChunks with text length:', pendingFile.text?.length);
             const parsedChunks = splitIntoChunks(pendingFile.text);
+            console.log('[DEBUG] splitIntoChunks returned', parsedChunks.length, 'chunks');
             setChunks(parsedChunks);
+            console.log('[DEBUG] setChunks called successfully');
             setStatus('idle');
 
             setShowResumeModal(false);
             setPendingFile(null);
             setResumableProject(null);
+        } else {
+            console.log('[DEBUG] handleStartOver called but pendingFile is NULL!');
         }
     };
 
@@ -217,7 +225,15 @@ export default function App() {
     };
 
     const handleStartTranslation = async () => {
-        if (!currentProject) return;
+        console.log('[DEBUG] handleStartTranslation called');
+        console.log('[DEBUG] currentProject:', currentProject?.id);
+        console.log('[DEBUG] chunks.length:', chunks.length);
+        console.log('[DEBUG] translatedChunks.length:', translatedChunks.length);
+
+        if (!currentProject) {
+            console.log('[DEBUG] No currentProject, returning early');
+            return;
+        }
 
         setIsTranslating(true);
         setStatus('translating');
@@ -238,13 +254,18 @@ export default function App() {
         const startIndex = translatedChunks.length;
         const chunksToTranslate = chunks.slice(startIndex);
 
+        console.log('[DEBUG] startIndex:', startIndex);
+        console.log('[DEBUG] chunksToTranslate.length:', chunksToTranslate.length);
+
         if (chunksToTranslate.length === 0) {
+            console.log('[DEBUG] No chunks to translate, setting status to complete');
             setIsTranslating(false);
             setStatus('complete');
             return;
         }
 
-        const newResults = await translateChunks(chunksToTranslate, glossary, async (current, total) => {
+        console.log('[DEBUG] Calling translateChunks with', chunksToTranslate.length, 'chunks');
+        await translateChunks(chunksToTranslate, glossary, async (current, total) => {
             const globalCurrent = startIndex + current;
             const globalTotal = chunks.length;
 
@@ -320,28 +341,18 @@ export default function App() {
         setWarningMessage(null);
 
         // Final Save of Translation
+        // Note: translatedChunks is already updated incrementally via onChunkComplete
         const completedProject = {
             ...updatedProject,
             status: 'completed',
-            translatedChunks: finalResults.length,
+            translatedChunks: translatedChunks.length,
             lastModified: Date.now()
         } as Project;
 
         await storageService.saveProject(completedProject);
 
-        // Ensure new chunks are saved
-        const newChunkDataList: import('./types').ChunkData[] = newResults.map(chunk => ({
-            projectId: completedProject.id,
-            chunkId: chunk.id,
-            position: chunk.position,
-            originalText: chunk.text,
-            originalType: chunk.type,
-            initialTranslation: chunk.translation,
-            currentTranslation: chunk.translation,
-            matchedTerms: chunk.matchedTerms
-        }));
-
-        await storageService.saveChunks(newChunkDataList);
+        // Note: chunks are already saved incrementally in onChunkComplete callback
+        // No need to save again here
     };
 
 

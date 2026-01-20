@@ -25,18 +25,43 @@ interface ApiKeyConfig {
     isPaid: boolean;
 }
 
+// Track paid keys locally for UI logic
+let localPaidKeys: string[] = [];
+let localFreeKeys: string[] = [];
+
 /**
  * Set API keys - sends to backend for storage
  */
 export async function setApiKeys(keys: string[] | ApiKeyConfig[]): Promise<void> {
-    // Normalize to string array
-    const keyStrings = keys.map(k => typeof k === 'string' ? k : k.key);
+    // Normalize to ApiKeyConfig array
+    const keyConfigs: ApiKeyConfig[] = keys.map(k =>
+        typeof k === 'string' ? { key: k, isPaid: false } : k
+    );
+
+    localPaidKeys = keyConfigs.filter(k => k.isPaid).map(k => k.key);
+    localFreeKeys = keyConfigs.filter(k => !k.isPaid).map(k => k.key);
+
+    // DEBUG: Log each key with its status
+    console.log('[DEBUG KEYS Frontend] Configuring API keys:');
+    keyConfigs.forEach((k, i) => {
+        console.log(`  Key ${i}: ${k.key.substring(0, 8)}...${k.key.slice(-4)} [${k.isPaid ? 'PAID' : 'FREE'}]`);
+    });
+    console.log(`[DEBUG KEYS Frontend] Total: ${localPaidKeys.length} paid, ${localFreeKeys.length} free`);
+
+    // Send all keys to backend (backend manages rotation)
+    const keyStrings = keyConfigs.map(k => k.key);
+
+    // Also send MinerU key if available from env
+    const mineruKey = import.meta.env.VITE_MINERU_API_KEY;
 
     try {
-        await api.setApiKeys(keyStrings);
-        console.log(`API keys sent to backend: ${keyStrings.length} keys`);
+        await api.setApiKeys(keyStrings, mineruKey || undefined);
+        console.log(`[DEBUG KEYS Frontend] Keys sent to backend successfully`);
+        if (mineruKey) {
+            console.log('[DEBUG KEYS Frontend] MinerU key also sent to backend');
+        }
     } catch (error) {
-        console.error('Failed to set API keys on backend:', error);
+        console.error('[DEBUG KEYS Frontend] Failed to set API keys on backend:', error);
         throw error;
     }
 }
@@ -45,16 +70,18 @@ export async function setApiKeys(keys: string[] | ApiKeyConfig[]): Promise<void>
  * Check if paid keys are available
  */
 export function hasPaidKeys(): boolean {
-    // This would need to be queried from backend
-    // For now, return false as we don't track paid status in backend
-    return false;
+    return localPaidKeys.length > 0;
 }
 
 /**
- * Skip to paid key (backend manages this automatically)
+ * Skip to paid key - This is managed by backend key rotation
+ * Returns true if paid keys exist
  */
 export function skipToPaidKey(): boolean {
-    // Backend handles key rotation automatically
+    if (localPaidKeys.length > 0) {
+        console.log('Paid keys available - backend will use them after free keys exhaust');
+        return true;
+    }
     return false;
 }
 
@@ -177,6 +204,14 @@ export async function translateChunks(
 ): Promise<TranslatedChunk[]> {
     if (onStatusUpdate) {
         onStatusUpdate('Starting translation via backend...');
+    }
+
+    // Ensure keys are synced to backend (in case backend was restarted)
+    const allKeys = [...localFreeKeys, ...localPaidKeys];
+    if (allKeys.length > 0) {
+        console.log('[translateChunks] Re-syncing keys to backend before translation...');
+        await api.setApiKeys(allKeys, import.meta.env.VITE_MINERU_API_KEY || undefined);
+        console.log('[translateChunks] Keys synced, proceeding with translation');
     }
 
     // Create a map for quick chunk lookup

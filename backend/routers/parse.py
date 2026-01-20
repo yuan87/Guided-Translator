@@ -23,23 +23,42 @@ async def parse_pdf(
     if not file.filename or not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="File must be a PDF")
     
-    # Check file size (max 50MB)
+    # Check file size (max 50MB for general, but MinerU has ~30MB limit)
     content = await file.read()
+    file_size_mb = len(content) / (1024 * 1024)
+    
     if len(content) > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File size must be less than 50MB")
     
+    # MinerU has stricter limits
+    MINERU_SIZE_LIMIT_MB = 30
+    if use_mineru and file_size_mb > MINERU_SIZE_LIMIT_MB:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"File size ({file_size_mb:.1f}MB) exceeds MinerU API limit of {MINERU_SIZE_LIMIT_MB}MB. "
+                   f"Please use a smaller PDF or disable MinerU to use legacy parsing."
+        )
+    
     try:
+        print(f"[Parse] PDF Upload received: {file.filename}, use_mineru={use_mineru}")
+        print(f"[Parse] File size: {file_size_mb:.2f} MB")
+        
         if use_mineru:
-            if not is_mineru_configured():
+            print(f"[Parse] Checking MinerU configuration...")
+            configured = is_mineru_configured()
+            print(f"[Parse] MinerU configured: {configured}")
+            
+            if not configured:
                 raise HTTPException(
                     status_code=400, 
                     detail="MinerU API key not configured. Set via /api/keys endpoint."
                 )
             
+            print(f"[Parse] Calling extract_with_mineru...")
             document = await extract_with_mineru(content, file.filename)
+            print(f"[Parse] Extraction successful! Text length: {len(document.text)}")
         else:
             # Fallback: basic text extraction without MinerU
-            # In production, could use PyMuPDF or similar
             raise HTTPException(
                 status_code=501, 
                 detail="Legacy PDF parsing not yet implemented. Please enable MinerU."
@@ -50,7 +69,25 @@ async def parse_pdf(
     except HTTPException:
         raise
     except Exception as e:
-        return ParseResult(success=False, error=str(e))
+        import traceback
+        error_msg = str(e)
+        print(f"[Parse] ERROR during PDF parsing: {error_msg}")
+        print(f"[Parse] Full traceback:\n{traceback.format_exc()}")
+        
+        # Improve error message for common MinerU errors
+        if "413" in error_msg:
+            error_msg = f"MinerU API error: File too large. MinerU has a ~30MB limit. Your file is {file_size_mb:.1f}MB."
+        elif "MinerU API error: Invalid API key" in error_msg:
+            error_msg = "MinerU API authentication failed. Please check your API key."
+        elif "MinerU API error: Access forbidden" in error_msg:
+            error_msg = "MinerU API access forbidden. Your API key may not have sufficient permissions."
+        elif "429" in error_msg:
+            error_msg = "MinerU API rate limited. Please wait a moment and try again."
+        elif "Failed to upload file to temporary storage" in error_msg:
+            error_msg = "Failed to upload PDF to temporary storage. Please try again."
+        # Keep original error for debugging
+        
+        return ParseResult(success=False, error=error_msg)
 
 
 @router.post("/markdown", response_model=ParseResult)

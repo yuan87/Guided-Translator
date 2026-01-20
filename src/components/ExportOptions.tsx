@@ -1,7 +1,6 @@
 // Export Options Component
 import { useState } from 'react';
 import { Download, FileText, File, Loader2 } from 'lucide-react';
-import { jsPDF } from 'jspdf';
 import { saveAs } from 'file-saver';
 import type { TranslatedChunk } from '../types';
 import { reassembleChunks } from '../services/chunkManager';
@@ -23,137 +22,42 @@ export default function ExportOptions({ translatedChunks }: ExportOptionsProps) 
         setExportProgress(0);
 
         try {
-            // Dynamically import html2canvas to avoid SSR issues if any
-            const html2canvas = (await import('html2canvas')).default;
+            // Import the API client function
+            const { exportPdf } = await import('../services/apiClient');
 
-            // Create a temporary container for rendering
-            const container = document.createElement('div');
-            container.style.position = 'absolute';
-            container.style.left = '-9999px';
-            container.style.top = '0';
-            container.style.width = '210mm'; // A4 width
-            container.style.backgroundColor = '#ffffff';
-            container.style.padding = '20mm';
-            container.style.fontFamily = 'Arial, sans-serif'; // Use system fonts that support unicode
-            container.id = 'pdf-render-container';
-            document.body.appendChild(container);
+            setExportProgress(20);
 
-            // Render content into container
-            const title = document.createElement('h1');
-            title.textContent = 'Technical Translation';
-            title.style.fontSize = '24px';
-            title.style.marginBottom = '20px';
-            title.style.color = '#1e293b';
-            container.appendChild(title);
+            // Prepare chunks for export
+            const exportChunks = translatedChunks.map((chunk, index) => ({
+                id: chunk.id || `chunk_${index}`,
+                text: chunk.text || '',
+                translation: chunk.translation,
+                type: chunk.type as 'heading' | 'paragraph' | 'list' | 'table',
+                position: chunk.position ?? index,
+            }));
 
-            const meta = document.createElement('p');
-            meta.textContent = `Generated on ${new Date().toLocaleString()}`;
-            meta.style.fontSize = '12px';
-            meta.style.color = '#64748b';
-            meta.style.marginBottom = '30px';
-            container.appendChild(meta);
+            console.log('[PDF Export] Sending', exportChunks.length, 'chunks to backend...');
+            setExportProgress(40);
 
-            const chunkContainer = document.createElement('div');
-            chunkContainer.style.display = 'flex';
-            chunkContainer.style.flexDirection = 'column';
-            chunkContainer.style.gap = '20px';
-            container.appendChild(chunkContainer);
-
-            // Populate chunks
-            for (let i = 0; i < translatedChunks.length; i++) {
-                const chunk = translatedChunks[i];
-                const chunkEl = document.createElement('div');
-                chunkEl.style.marginBottom = '15px';
-
-                // Chunk Header
-                const header = document.createElement('div');
-                header.textContent = `Chunk ${chunk.position + 1}`;
-                header.style.fontSize = '10px';
-                header.style.color = '#94a3b8'; // slate-400
-                header.style.marginBottom = '5px';
-                chunkEl.appendChild(header);
-
-                // Translations
-                const content = document.createElement('div');
-                content.textContent = chunk.translation;
-                content.style.lineHeight = '1.6';
-                content.style.whiteSpace = 'pre-wrap';
-
-                if (chunk.type === 'heading') {
-                    content.style.fontSize = '18px';
-                    content.style.fontWeight = 'bold';
-                    content.style.color = '#000000';
-                } else {
-                    content.style.fontSize = '14px';
-                    content.style.color = '#334155'; // slate-700
-                }
-
-                chunkEl.appendChild(content);
-                chunkContainer.appendChild(chunkEl);
-
-                // Update progress occasionally
-                if (i % 20 === 0) {
-                    setExportProgress(Math.round((i / translatedChunks.length) * 50));
-                    await new Promise(r => setTimeout(r, 0));
-                }
-            }
-
-            // Wait for DOM
-            await new Promise(resolve => setTimeout(resolve, 500));
-
-            setExportProgress(60);
-
-            // Capture Canvas
-            const canvas = await html2canvas(container, {
-                scale: 2, // Retain quality
-                useCORS: true,
-                logging: false
+            // Call backend to generate PDF
+            const pdfBlob = await exportPdf({
+                chunks: exportChunks,
+                title: 'Technical Translation',
             });
 
             setExportProgress(80);
 
-            // Generate PDF
-            const contentWidth = canvas.width;
-            const contentHeight = canvas.height;
-
-            // A4 Dimensions in PDF units (mm)
-            const pdfUserInfo = new jsPDF('p', 'mm', 'a4');
-            const pageWidth = 210;
-            const pageHeight = 297;
-
-            // Calculate image dimensions in PDF
-            const imgWidth = pageWidth;
-            const imgHeight = (contentHeight * pageWidth) / contentWidth;
-
-            let heightLeft = imgHeight;
-            let position = 0;
-
-            // Add first page
-            pdfUserInfo.addImage(canvas.toDataURL('image/png'), 'PNG', 0, position, imgWidth, imgHeight);
-            heightLeft -= pageHeight;
-
-            // Add subsequent pages
-            while (heightLeft >= 0) {
-                position = heightLeft - imgHeight;
-                pdfUserInfo.addPage();
-                pdfUserInfo.addImage(canvas.toDataURL('image/png'), 'PNG', 0, position, imgWidth, imgHeight);
-                heightLeft -= pageHeight;
-            }
-
-            // Cleanup
-            document.body.removeChild(container);
-
-            setExportProgress(90);
-
-            // Use FileSaver.js for reliable download
-            const blob = pdfUserInfo.output('blob');
+            // Download the PDF
+            const { saveAs } = await import('file-saver');
             const filename = `translation_${Date.now()}.pdf`;
-            saveAs(blob, filename);
-            console.log('✅ PDF download triggered:', filename);
+            saveAs(pdfBlob, filename);
+
+            console.log('✅ Text-based PDF downloaded:', filename);
+            setExportProgress(100);
 
         } catch (error) {
             console.error("PDF Export failed:", error);
-            alert("Failed to export PDF. Please try again.");
+            alert("Failed to export PDF. Please try again.\n\n" + (error instanceof Error ? error.message : String(error)));
         } finally {
             setIsExporting(false);
             setExportProgress(0);

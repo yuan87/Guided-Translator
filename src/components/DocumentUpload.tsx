@@ -65,16 +65,20 @@ export default function DocumentUpload({ onDocumentLoaded, currentDocument, apiK
         setProgress({ current: 0, total: 0 });
 
         try {
-            // Normalize apiKeys to string[] (extract just the key property if ApiKeyConfig[])
-            const keyStrings = apiKeys && apiKeys.length > 0
-                ? (typeof apiKeys[0] === 'string'
-                    ? apiKeys as string[]
-                    : (apiKeys as ApiKeyConfig[]).map(k => k.key))
-                : undefined;
+            // NOTE: Don't pass API keys to extractStructuredContent
+            // All Gemini API calls should go through the backend
+            // The backend handles key management and rate limiting
+            console.log('[DocumentUpload] Starting document extraction via backend...');
 
-            const doc = await extractStructuredContent(file, keyStrings, (current, total) => {
-                setProgress({ current, total });
-            }, useMinerU);
+            const doc = await extractStructuredContent(
+                file,
+                undefined,  // No direct API keys - backend handles them
+                (current, total) => {
+                    setProgress({ current, total });
+                },
+                useMinerU,
+                true  // useBackend = true
+            );
 
             if (doc.language !== 'en') {
                 setError(`Warning: Document appears to be in ${doc.language === 'zh' ? 'Chinese' : 'an unknown language'}. Please upload an English document.`);

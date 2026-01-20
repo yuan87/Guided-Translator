@@ -24,9 +24,14 @@ async def set_api_keys(request: SetApiKeysRequest):
         current_key_index = 0
         if gemini_key_pool:
             update_api_keys(gemini_key=gemini_key_pool[0])
+        # DEBUG: Log key configuration
+        for i, key in enumerate(gemini_key_pool):
+            print(f"[DEBUG KEYS] Key {i}: {key[:8]}...{key[-4:]} {'(ACTIVE)' if i == 0 else ''}")
+        print(f"[DEBUG KEYS] Total {len(gemini_key_pool)} keys configured")
     
     if request.mineru_key:
         update_api_keys(mineru_key=request.mineru_key)
+        print(f"[DEBUG KEYS] MinerU key configured: {request.mineru_key[:20]}...")
     
     return ApiKeyStatus(
         gemini_configured=bool(gemini_key_pool),
@@ -47,9 +52,15 @@ async def get_key_status():
 
 def get_current_gemini_key() -> str | None:
     """Get the current active Gemini API key."""
+    key = None
     if gemini_key_pool:
-        return gemini_key_pool[current_key_index]
-    return settings.gemini_api_key or None
+        key = gemini_key_pool[current_key_index]
+        print(f"[DEBUG KEYS] Using key {current_key_index}/{len(gemini_key_pool)}: {key[:8]}...{key[-4:]}")
+    else:
+        key = settings.gemini_api_key or None
+        if key:
+            print(f"[DEBUG KEYS] Using env key: {key[:8]}...{key[-4:]}")
+    return key
 
 
 def rotate_gemini_key() -> bool:
@@ -57,10 +68,14 @@ def rotate_gemini_key() -> bool:
     global current_key_index
     
     if len(gemini_key_pool) <= 1:
+        print(f"[DEBUG KEYS] Cannot rotate - only {len(gemini_key_pool)} key(s) available")
         return False
     
+    old_index = current_key_index
     current_key_index = (current_key_index + 1) % len(gemini_key_pool)
-    update_api_keys(gemini_key=gemini_key_pool[current_key_index])
+    new_key = gemini_key_pool[current_key_index]
+    update_api_keys(gemini_key=new_key)
+    print(f"[DEBUG KEYS] ROTATED from key {old_index} to key {current_key_index}: {new_key[:8]}...{new_key[-4:]}")
     return True
 
 

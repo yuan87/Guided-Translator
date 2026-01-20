@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import parse, translate, keys
+from routers import parse, translate, keys, export
 from config import settings
 
 
@@ -53,6 +53,7 @@ app.add_middleware(
 app.include_router(parse.router, prefix="/api/parse", tags=["Parsing"])
 app.include_router(translate.router, prefix="/api/translate", tags=["Translation"])
 app.include_router(keys.router, prefix="/api/keys", tags=["API Keys"])
+app.include_router(export.router, prefix="/api/export", tags=["Export"])
 
 
 @app.get("/")

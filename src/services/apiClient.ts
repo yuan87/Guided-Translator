@@ -220,6 +220,12 @@ export async function translateBatchStreaming(
         throw new Error(`Translation Error (${response.status}): ${errorText}`);
     }
 
+    console.log('[SSE] Response received:', {
+        status: response.status,
+        contentType: response.headers.get('content-type'),
+        ok: response.ok
+    });
+
     const results: TranslatedChunk[] = [];
     const reader = response.body?.getReader();
     const decoder = new TextDecoder();
@@ -230,6 +236,66 @@ export async function translateBatchStreaming(
 
     let buffer = '';
 
+    // Helper function to extract and parse all JSON events from buffer
+    const extractEvents = (text: string): { events: TranslationProgress[], remaining: string } => {
+        const events: TranslationProgress[] = [];
+        let remaining = text;
+
+        // Find all JSON objects in the text
+        const regex = /\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g;
+        let match;
+        let lastIndex = 0;
+
+        while ((match = regex.exec(text)) !== null) {
+            try {
+                const parsed = JSON.parse(match[0]) as TranslationProgress;
+                if (parsed.event) {
+                    events.push(parsed);
+                    lastIndex = regex.lastIndex;
+                }
+            } catch (e) {
+                // Not valid JSON, skip
+            }
+        }
+
+        // Keep any remaining text after the last parsed event
+        remaining = text.substring(lastIndex);
+
+        return { events, remaining };
+    };
+
+    // Process a list of events
+    const processEvents = (events: TranslationProgress[]) => {
+        for (const event of events) {
+            console.log('[SSE] Event:', event.event, event.chunk_id);
+
+            switch (event.event) {
+                case 'progress':
+                    onProgress?.(event.current, event.total);
+                    break;
+
+                case 'chunk_complete':
+                    if (event.translated_chunk) {
+                        console.log('[SSE] Chunk translated:', event.translated_chunk.id,
+                            'Length:', event.translated_chunk.translated?.length);
+                        results.push(event.translated_chunk);
+                        onChunkComplete?.(event.translated_chunk);
+                    }
+                    onProgress?.(event.current, event.total);
+                    break;
+
+                case 'error':
+                    console.error('[SSE] Translation error:', event.error_message);
+                    onError?.(event.chunk_id || 'unknown', event.error_message || 'Unknown error');
+                    break;
+
+                case 'done':
+                    console.log('[SSE] Translation complete, total chunks:', results.length);
+                    break;
+            }
+        }
+    };
+
     while (true) {
         const { done, value } = await reader.read();
 
@@ -237,59 +303,20 @@ export async function translateBatchStreaming(
 
         buffer += decoder.decode(value, { stream: true });
 
-        // SSE events are separated by double newlines
-        // Each event has: event: <type>\ndata: <json>\n\n
-        const events = buffer.split('\n\n');
-        buffer = events.pop() || ''; // Keep incomplete event in buffer
+        // Try to extract and process events from buffer
+        const { events, remaining } = extractEvents(buffer);
+        if (events.length > 0) {
+            processEvents(events);
+        }
+        buffer = remaining;
+    }
 
-        for (const eventBlock of events) {
-            if (!eventBlock.trim()) continue;
-
-            const lines = eventBlock.split('\n');
-            let eventData = '';
-
-            for (const line of lines) {
-                if (line.startsWith('data:')) {
-                    eventData = line.slice(5).trim();
-                } else if (line.startsWith('data: ')) {
-                    eventData = line.slice(6).trim();
-                }
-            }
-
-            if (!eventData) continue;
-
-            try {
-                const event: TranslationProgress = JSON.parse(eventData);
-
-                console.log('[SSE] Event received:', event.event, event.chunk_id);
-
-                switch (event.event) {
-                    case 'progress':
-                        onProgress?.(event.current, event.total);
-                        break;
-
-                    case 'chunk_complete':
-                        if (event.translated_chunk) {
-                            console.log('[SSE] Chunk translated:', event.translated_chunk.id,
-                                'Length:', event.translated_chunk.translated?.length);
-                            results.push(event.translated_chunk);
-                            onChunkComplete?.(event.translated_chunk);
-                        }
-                        onProgress?.(event.current, event.total);
-                        break;
-
-                    case 'error':
-                        console.error('[SSE] Translation error:', event.error_message);
-                        onError?.(event.chunk_id || 'unknown', event.error_message || 'Unknown error');
-                        break;
-
-                    case 'done':
-                        console.log('[SSE] Translation complete, total chunks:', results.length);
-                        break;
-                }
-            } catch (e) {
-                console.warn('[SSE] Failed to parse event:', eventBlock, e);
-            }
+    // Process any remaining events in the buffer
+    if (buffer.trim()) {
+        console.log('[SSE] Processing remaining buffer...');
+        const { events } = extractEvents(buffer);
+        if (events.length > 0) {
+            processEvents(events);
         }
     }
 
@@ -317,4 +344,41 @@ export async function translateBatchSync(
 
 export async function healthCheck(): Promise<{ status: string }> {
     return apiFetch<{ status: string }>('/health');
+}
+
+// ============ PDF Export ============
+
+export interface ExportPdfChunk {
+    id: string;
+    text: string;
+    translation: string;
+    type: 'heading' | 'paragraph' | 'list' | 'table';
+    position: number;
+}
+
+export interface ExportPdfRequest {
+    chunks: ExportPdfChunk[];
+    title: string;
+    include_original?: boolean;
+}
+
+/**
+ * Export translation to text-based PDF via backend.
+ * Returns a Blob that can be downloaded.
+ */
+export async function exportPdf(request: ExportPdfRequest): Promise<Blob> {
+    const response = await fetch(`${API_BASE}/api/export/pdf`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(request),
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`PDF Export Error (${response.status}): ${errorText}`);
+    }
+
+    return response.blob();
 }

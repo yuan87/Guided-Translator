@@ -4,7 +4,6 @@ Loads from environment variables and .env file.
 """
 
 from pydantic_settings import BaseSettings
-from functools import lru_cache
 
 
 class Settings(BaseSettings):
@@ -17,6 +16,11 @@ class Settings(BaseSettings):
     # MinerU Cloud API base URL
     mineru_api_base: str = "https://mineru.net/api/v4"
     
+    # MinerU Local API URL (if running locally via Docker or pip)
+    # Set this to use local MinerU instead of cloud API
+    # Example: http://localhost:8000
+    mineru_local_url: str = ""
+    
     # Rate limiting
     gemini_rpm_limit: int = 15  # Requests per minute for free tier
     
@@ -25,13 +29,12 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
 
 
-@lru_cache()
 def get_settings() -> Settings:
-    """Get cached settings instance."""
+    """Get settings instance. Created fresh each time for development."""
     return Settings()
 
 
-# Global settings instance
+# Global settings instance (created on import)
 settings = get_settings()
 
 

@@ -64,8 +64,12 @@ async def translate_batch(request: TranslateBatchRequest):
         total = len(request.chunks)
         translated_chunks = []
         
+        print(f"[DEBUG SSE] Starting translation of {total} chunks")
+        
         for i, chunk in enumerate(request.chunks):
             try:
+                print(f"[DEBUG SSE] Translating chunk {i+1}/{total}: {chunk.id}")
+                
                 # Send progress event
                 progress = TranslationProgress(
                     event="progress",
@@ -85,6 +89,8 @@ async def translate_batch(request: TranslateBatchRequest):
                 )
                 translated_chunks.append(result)
                 
+                print(f"[DEBUG SSE] Chunk {i+1}/{total} translated successfully")
+                
                 # Send chunk complete event
                 complete = TranslationProgress(
                     event="chunk_complete",
@@ -102,6 +108,7 @@ async def translate_batch(request: TranslateBatchRequest):
                 await asyncio.sleep(0.3)
                 
             except Exception as e:
+                print(f"[DEBUG SSE] Error translating chunk {i+1}: {str(e)}")
                 # Send error event
                 error = TranslationProgress(
                     event="error",
